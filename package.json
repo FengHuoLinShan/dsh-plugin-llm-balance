@@ -1,0 +1,18 @@
+{
+  "name": "dsh-plugin-llm-balance",
+  "version": "0.1.0",
+  "description": "DSH 通用插件：页面右上角可拖动的 API 余额悬浮球，按余额分档变色并实时刷新",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "license": "MIT"
+}
