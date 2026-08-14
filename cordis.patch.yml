@@ -1,0 +1,23 @@
+# dsh-plugin-llm-balance — 官方 bundle 配置层（dsh.bundle.patch）。
+#
+# 本文件是插件的「激活层」：profile 组合该 bundle 时，按 loader 的 patch
+# 语义把下面的插件行插入配置树（行 id = llm-balance，插件名 = 包名，
+# 由 Node 模块解析定位到已安装的包）。因此用户只需一条命令即可安装并启用：
+#
+#   dsh plugin --profile web add dsh-plugin-llm-balance
+#
+# 之后在 ~/.dsh/profiles/web/cordis.patch.yml 中按 id 覆盖 config 即可
+# （例如 - update: { id: llm-balance, config: { refreshMs: 30000 } }），
+# 无需改动本文件。
+#
+# 配置字段（全部有宽松默认值，可缺省）：
+#   refreshMs  前端轮询间隔（默认 60000）
+#   timeoutMs  服务端余额查询超时（默认 15000）
+#   provider   （兼容层）单 provider 模式，默认 deepseek
+#   apiKeyEnv  （兼容层）凭证引用名，默认 DEEPSEEK_API_KEY
+#   baseURL    （兼容层）可选 base URL 覆盖
+# 多 provider 模式开箱即用：provider 清单自动来自内置表 + llm-pi-ai
+# settings 命名空间，Key 经 DSH credentials seam 解析，无需任何配置。
+- insert:
+    - id: llm-balance
+      name: dsh-plugin-llm-balance
