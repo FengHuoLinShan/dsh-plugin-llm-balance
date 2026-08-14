@@ -1,0 +1,6 @@
+# 显式声明排除规则，避免 npm 回退到 .gitignore 的告警。
+# 发布内容由 package.json 的 files 白名单控制（files 优先于 .npmignore）。
+node_modules/
+.pnpm-store/
+*.tgz
+.DS_Store
