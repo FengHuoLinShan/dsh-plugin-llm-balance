@@ -11,6 +11,19 @@
  *    { duration, timeUnit } 对象（300 分钟 → 5h），顶层 usage 补为周限额；
  *  - kimi 多窗口限额（5h + weekly）解析、无效项过滤、同标签去重，
  *    旧响应（无 limits）回退为单窗口周限额；
+ *  - openai-codex（Codex Connect）：真实 OpenAICodexUsage 映射（weekly/5h/
+ *    monthly/credits）、codex bucket 非首位精确选中、非整除秒数精确标签
+ *    （5401s → "5401s"）、非法 credits.balance 拒绝、unlimited credits →
+ *    有限 100/100、空/非法 usage 安全拒绝；
+ *    注入 loader 验证模块缺失/不兼容/未登录/查询失败/成功路径；
+ *    路由内置发现 + provider 过滤 + 响应无 token/Key 泄漏；
+ *  - client 最近 3 个 provider 的成员集合实时更新、显示槽位保持稳定；
+ *    openai-codex configured:false 显示「未登录」/tooltip「未登录 ChatGPT」、
+ *    查询失败「用量查询失败」，其余 provider 保持原文案；
+ *  - opencode-go（OpenCode Go）：真实 usage.rolling/weekly 双窗口解析
+ *    （percent 为已用百分比 → amount=100-percent、limit=100，resetsAt →
+ *    resetTime，monthly 忽略）、数字字符串防御、部分无效窗口跳过、
+ *    全部无效/越界拒绝（error:unavailable）、provider 过滤/发现、无 Key 泄漏；
  *  - 未配置 Key 的 provider 报 configured:false；
  *  - 单 provider 兼容层（顶层字段 = config.provider 条目）；
  *  - 配置归一化（非法值回退默认，零依赖）；
@@ -18,9 +31,13 @@
  */
 import {
   apply,
+  mapOpenAICodexUsage,
   normalizeConfig,
+  queryCodexQuota,
   recentProvidersProjection,
   requestedProviders,
+  setCodexConnectLoader,
+  windowKeyOfSeconds,
 } from "../lib/index.js"
 
 let failures = 0
@@ -267,7 +284,7 @@ console.log("== 10. DeepSeek 数字余额兼容 + kimi limits 自带 weekly 去�
   globalThis.fetch = origFetch
 }
 
-console.log("== 11. client 跨会话聚合 ==")
+console.log("== 11. client 跨会话聚合 + 行文案 ==")
 {
   let clientExports
   globalThis.window = {
@@ -295,8 +312,360 @@ console.log("== 11. client 跨会话聚合 ==")
   })
   assert(JSON.stringify(recent) === JSON.stringify(["deepseek", "alpha", "kimi-coding"]),
     "同 provider 取最新时间，并列按 id 稳定排序后取三项")
+
+  const stable = clientExports.stableRecentProviders
+  assert(JSON.stringify(stable([], ["a", "b", "c", "d"])) === JSON.stringify(["a", "b", "c"]),
+    "首次显示按实时最近顺序取三项")
+  assert(JSON.stringify(stable(["a", "b", "c"], ["c", "a", "b"])) === JSON.stringify(["a", "b", "c"]),
+    "同一最近集合仅 recency 变化时不重排")
+  assert(JSON.stringify(stable(["a", "b", "c"], ["b", "d", "c"])) === JSON.stringify(["d", "b", "c"]),
+    "单个新 provider 填入被淘汰项的原槽位")
+  const replaced = stable(["a", "b", "c"], ["e", "b", "d"])
+  assert(JSON.stringify(replaced) === JSON.stringify(["e", "b", "d"]),
+    "多个新 provider 依次填充空槽位，保留未淘汰 provider 的位置")
+  assert(JSON.stringify([...replaced].sort()) === JSON.stringify(["b", "d", "e"]),
+    "稳定槽位结果的成员集合严格等于实时最近集合")
+  assert(JSON.stringify(stable(["a", "b"], ["c", "a", "b"])) === JSON.stringify(["a", "b", "c"]),
+    "最近集合扩充时在现有槽位后追加新 provider")
+  assert(JSON.stringify(stable(["a", "b", "c"], ["c", "b"])) === JSON.stringify(["b", "c"]),
+    "不足三项时压缩空槽位并保持剩余 provider 的相对槽位顺序")
+
   const clientSource = await (await import("node:fs/promises")).readFile(new URL("../lib/client.js", import.meta.url), "utf8")
   assert(!clientSource.includes(".sessions.models"), "client 不包含 session.models RPC")
+
+  // openai-codex 行文案：configured:false → 未登录 / 未登录 ChatGPT；失败 → 用量查询失败。
+  assert(clientExports.rowValueText({ provider: "openai-codex", configured: false }) === "未登录", "openai-codex 未登录 → 行值显示 未登录")
+  assert(clientExports.rowTitle({ provider: "openai-codex", configured: false }) === "OpenAI Codex 未登录 ChatGPT", "openai-codex 未登录 → tooltip 未登录 ChatGPT")
+  assert(clientExports.rowTitle({ provider: "openai-codex", configured: true, status: "error", error: "unavailable" }) === "OpenAI Codex 用量查询失败", "openai-codex 查询失败 → tooltip 用量查询失败")
+  assert(clientExports.rowValueText({ provider: "openai-codex", configured: true, status: "error" }) === "—", "openai-codex 失败行值仍为 —")
+  // 其余 provider 保持原文案。
+  assert(clientExports.rowValueText({ provider: "deepseek", configured: false }) === "未配置", "deepseek 未配置 → 行值保持 未配置")
+  assert(clientExports.rowTitle({ provider: "deepseek", configured: false, ref: "DEEPSEEK_API_KEY" }) === "DeepSeek 未配置 Key（DEEPSEEK_API_KEY）", "deepseek 未配置 → tooltip 保持 未配置 Key（ref）")
+  assert(clientExports.rowTitle({ provider: "deepseek", configured: true, status: "error" }) === "DeepSeek 余额查询失败", "deepseek 查询失败 → tooltip 保持 余额查询失败")
+  assert(clientExports.rowTitle({ provider: "moonshotai", configured: false }) === "Moonshot 未配置 Key", "moonshotai 未配置 → tooltip 保持 未配置 Key 无 ref")
+}
+
+console.log("== 12. openai-codex：Codex Connect 配额映射（纯函数）==")
+{
+  // 真实周限额响应：remainingPercent 68 / windowSeconds 604800。
+  const weekly = mapOpenAICodexUsage({
+    rateLimits: [{ id: "codex", name: "Codex", windows: [{ remainingPercent: 68, windowSeconds: 604800 }] }],
+  })
+  assert(weekly.kind === "quota" && weekly.amount === "68" && weekly.limit === "100", "weekly 68% → quota amount 68 / limit 100")
+  assert(JSON.stringify(weekly.windows) === JSON.stringify([{ window: "weekly", amount: "68", limit: "100" }]), "604800s → weekly 窗口（remainingPercent 为 amount）")
+
+  // 5h 限流窗口：remainingPercent 74 / windowSeconds 18000。
+  const fiveHours = mapOpenAICodexUsage({
+    rateLimits: [{ id: "codex", windows: [{ remainingPercent: 74, windowSeconds: 18000 }] }],
+  })
+  assert(fiveHours.windows[0].window === "5h" && fiveHours.windows[0].amount === "74" && fiveHours.windows[0].limit === "100", "18000s → 5h 窗口")
+
+  // 可选月配额：individualLimit 追加为 monthly（无重复标签）。
+  const multi = mapOpenAICodexUsage({
+    rateLimits: [{ id: "codex", windows: [
+      { remainingPercent: 74, windowSeconds: 18000 },
+      { remainingPercent: 68, windowSeconds: 604800 },
+    ] }],
+    individualLimit: { limit: "500", used: "200", remaining: "300", remainingPercent: 60 },
+  })
+  assert(JSON.stringify(multi.windows.map((w) => w.window)) === JSON.stringify(["5h", "weekly", "monthly"]), "5h + weekly + monthly 三窗口")
+  const monthly = multi.windows.find((w) => w.window === "monthly")
+  assert(!!monthly && monthly.amount === "300" && monthly.limit === "500", "individualLimit → monthly 窗口 remaining/limit")
+
+  // 未知时长 → 稳定时长标签（windowKeyOfSeconds）。
+  assert(windowKeyOfSeconds(18000) === "5h" && windowKeyOfSeconds(604800) === "weekly", "18000/604800 秒标签")
+  assert(windowKeyOfSeconds(7200) === "2h" && windowKeyOfSeconds(86400) === "1d" && windowKeyOfSeconds(900) === "15m" && windowKeyOfSeconds(45) === "45s", "未知时长稳定标签（2h/1d/15m/45s）")
+  const unknown = mapOpenAICodexUsage({ rateLimits: [{ id: "codex", windows: [{ remainingPercent: 50, windowSeconds: 7200 }] }] })
+  assert(unknown.windows[0].window === "2h" && unknown.windows[0].amount === "50", "未知 windowSeconds 映射为稳定时长标签")
+
+  // 主 bucket 回退：无 codex bucket 时取首个。
+  const fallback = mapOpenAICodexUsage({ rateLimits: [{ id: "other", windows: [{ remainingPercent: 40, windowSeconds: 604800 }] }] })
+  assert(fallback.windows[0].window === "weekly" && fallback.windows[0].amount === "40", "无 codex bucket 时回退首个 bucket")
+
+  // codex bucket 非首位时仍精确选中 id === "codex"（不误取首个 bucket）。
+  const secondBucket = mapOpenAICodexUsage({
+    rateLimits: [
+      { id: "other", windows: [{ remainingPercent: 10, windowSeconds: 604800 }] },
+      { id: "codex", windows: [{ remainingPercent: 68, windowSeconds: 604800 }] },
+    ],
+  })
+  assert(secondBucket.windows[0].amount === "68" && secondBucket.windows[0].window === "weekly",
+    "codex bucket 非首位时仍精确选中 id === \"codex\"（而非首个 bucket）")
+  const secondMixed = mapOpenAICodexUsage({
+    rateLimits: [
+      { id: "codex", windows: [{ remainingPercent: 30, windowSeconds: 18000 }] },
+      { id: "other", windows: [{ remainingPercent: 99, windowSeconds: 604800 }] },
+      { id: "codex", windows: [{ remainingPercent: 50, windowSeconds: 604800 }] },
+    ],
+  })
+  assert(secondMixed.windows[0].window === "5h" && secondMixed.windows[0].amount === "30",
+    "多个 codex bucket 时取首个 id === \"codex\"")
+
+  // 精确时长标签：仅在可整除时缩写 d/h/m，否则原样 Ns。
+  assert(windowKeyOfSeconds(5401) === "5401s", "5401s 不可整除 → 原样 5401s（而非 1h/90m）")
+  assert(windowKeyOfSeconds(86400) === "1d" && windowKeyOfSeconds(7200) === "2h" && windowKeyOfSeconds(900) === "15m" && windowKeyOfSeconds(45) === "45s",
+    "可整除时长按 d/h/m 缩写（1d/2h/15m），不足 60s 原样 Ns")
+  const exactSeconds = mapOpenAICodexUsage({ rateLimits: [{ id: "codex", windows: [{ remainingPercent: 50, windowSeconds: 5401 }] }] })
+  assert(exactSeconds.windows[0].window === "5401s" && exactSeconds.windows[0].amount === "50", "5401s 窗口映射为精确秒标签")
+
+  // credits 回退：无 rate-limit/月配额时，有限余额 → USD balance；unlimited → credits 段。
+  const creditsBalance = mapOpenAICodexUsage({ rateLimits: [], credits: { unlimited: false, balance: "12.50" } })
+  assert(creditsBalance.kind === "balance" && creditsBalance.amount === "12.50" && creditsBalance.currency === "USD", "有限 credits.balance → balance 口径（USD）")
+  const creditsNumeric = mapOpenAICodexUsage({ rateLimits: [], credits: { unlimited: false, balance: 12.5 } })
+  assert(creditsNumeric.kind === "balance" && creditsNumeric.amount === "12.5" && creditsNumeric.currency === "USD", "数字 credits.balance 同样解析为 USD balance")
+  const creditsUnlimited = mapOpenAICodexUsage({ rateLimits: [], credits: { unlimited: true } })
+  assert(creditsUnlimited.kind === "quota" && creditsUnlimited.windows[0].window === "credits", "unlimited credits → credits 配额段")
+  assert(creditsUnlimited.amount === "100" && creditsUnlimited.limit === "100"
+    && creditsUnlimited.windows[0].amount === "100" && creditsUnlimited.windows[0].limit === "100",
+    "unlimited credits → 有限 100/100 配额（client 渲染绿色 100%）")
+
+  // 非法 credits 安全拒绝。
+  let creditsRejected = false
+  try { mapOpenAICodexUsage({ rateLimits: [], credits: { unlimited: false, balance: "abc" } }) } catch { creditsRejected = true }
+  assert(creditsRejected, "非法 credits.balance（非数字字符串）拒绝")
+  creditsRejected = false
+  try { mapOpenAICodexUsage({ rateLimits: [], credits: { unlimited: false } }) } catch { creditsRejected = true }
+  assert(creditsRejected, "缺失 credits.balance 拒绝")
+  creditsRejected = false
+  try { mapOpenAICodexUsage({ rateLimits: [], credits: { unlimited: false, balance: Infinity } }) } catch { creditsRejected = true }
+  assert(creditsRejected, "非有限 credits.balance（Infinity）拒绝")
+
+  // 空/非法 usage 安全拒绝。
+  let rejected = false
+  try { mapOpenAICodexUsage({ rateLimits: [] }) } catch { rejected = true }
+  assert(rejected, "空 usage 拒绝")
+  rejected = false
+  try { mapOpenAICodexUsage(null) } catch { rejected = true }
+  assert(rejected, "非法 usage（null）拒绝")
+  rejected = false
+  try { mapOpenAICodexUsage({ rateLimits: "bad" }) } catch { rejected = true }
+  assert(rejected, "非法 rateLimits 拒绝")
+
+  // 映射产物是无密钥投影：不含 token（JWT）或 Key 形状。
+  const mappedJson = JSON.stringify({
+    w: mapOpenAICodexUsage({ rateLimits: [{ id: "codex", windows: [{ remainingPercent: 68, windowSeconds: 604800 }] }] }),
+    b: mapOpenAICodexUsage({ rateLimits: [], credits: { unlimited: false, balance: "1.00" } }),
+  })
+  assert(!mappedJson.includes("eyJ") && !mappedJson.includes("sk-") && !mappedJson.includes("token"), "映射输出无 token/Key 泄漏")
+}
+
+console.log("== 13. openai-codex：queryCodexQuota 模块交互（注入 loader）==")
+{
+  // 模块缺失（未安装 dsh-codex-connect）。
+  const missing = await queryCodexQuota({ load: async () => { throw new Error("MODULE_NOT_FOUND") } })
+  assert(missing.configured === false && missing.ref === "dsh-codex-connect", "模块缺失 → configured:false + 安全 ref")
+
+  // 模块不兼容（缺根导出）。
+  const incompatible = await queryCodexQuota({ load: async () => ({ someExport: true }) })
+  assert(incompatible.configured === false && incompatible.ref === "dsh-codex-connect", "模块不兼容（缺导出）→ configured:false")
+
+  // OAuth 未登录：不触发配额查询。
+  let reads = 0
+  const signedOut = await queryCodexQuota({ load: async () => ({
+    OpenAICodexCredentialStore: class {},
+    openAICodexAuthStatus: async () => ({ authenticated: false }),
+    readOpenAICodexRateLimits: async () => { reads++; throw new Error("must not be called") },
+  }) })
+  assert(signedOut.configured === false && signedOut.ref === "openai-codex" && reads === 0, "OAuth 未登录 → configured:false，不查询配额")
+
+  // 已登录 + 成功查询（真实 weekly + 5h 响应）。
+  const usage = {
+    rateLimits: [{ id: "codex", windows: [
+      { remainingPercent: 68, windowSeconds: 604800 },
+      { remainingPercent: 74, windowSeconds: 18000 },
+    ] }],
+  }
+  reads = 0
+  const ok = await queryCodexQuota({ load: async () => ({
+    OpenAICodexCredentialStore: class { constructor() { this.filename = "fake" } },
+    openAICodexAuthStatus: async () => ({ authenticated: true, expiresAt: new Date("2030-01-01T00:00:00Z") }),
+    readOpenAICodexRateLimits: async () => { reads++; return usage },
+  }) })
+  assert(ok.configured === true && ok.status === "ok" && ok.kind === "quota", "已登录 + 查询成功 → ok quota")
+  assert(JSON.stringify(ok.windows) === JSON.stringify([
+    { window: "weekly", amount: "68", limit: "100" },
+    { window: "5h", amount: "74", limit: "100" },
+  ]), "成功查询映射 weekly 68% + 5h 74%")
+  assert(reads === 1, "同源查询只读一次配额")
+
+  // 已登录但配额查询失败 → error:unavailable，不透出底层错误信息。
+  const fail = await queryCodexQuota({ load: async () => ({
+    OpenAICodexCredentialStore: class {},
+    openAICodexAuthStatus: async () => ({ authenticated: true }),
+    readOpenAICodexRateLimits: async () => { throw new Error("network boom") },
+  }) })
+  assert(fail.configured === true && fail.status === "error" && fail.error === "unavailable", "已登录但查询失败 → error:unavailable")
+  assert(!JSON.stringify(fail).includes("network boom"), "底层错误信息不外泄")
+}
+
+console.log("== 14. openai-codex：路由集成（内置发现 + 过滤 + 无泄漏）==")
+{
+  const { ctx, handler } = makeCtx({ section: void 0, creds: {} })
+  apply(ctx, {})
+  const all = await responseBody(handler)
+  const builtin = all.providers.find((p) => p.provider === "openai-codex")
+  assert(!!builtin && builtin.configured === false, "openai-codex 为内置 provider；未安装 codex-connect 时如实 configured:false（不误报配置错误）")
+  assert(!JSON.stringify(all).includes("eyJ") && !JSON.stringify(all).includes("sk-"), "内置发现响应无 token/Key 泄漏")
+
+  // 注入 loader 后走完整成功链路（含 providers 过滤）。
+  setCodexConnectLoader(async () => ({
+    OpenAICodexCredentialStore: class {},
+    openAICodexAuthStatus: async () => ({ authenticated: true }),
+    readOpenAICodexRateLimits: async () => ({
+      rateLimits: [{ id: "codex", windows: [{ remainingPercent: 68, windowSeconds: 604800 }] }],
+    }),
+  }))
+  try {
+    const filtered = await responseBody(handler, "/plugins/llm-balance?providers=openai-codex")
+    assert(JSON.stringify(filtered.providers.map((e) => e.provider)) === JSON.stringify(["openai-codex"]), "过滤模式只查询 openai-codex")
+    const entry = filtered.providers[0]
+    assert(entry.configured === true && entry.status === "ok" && entry.kind === "quota"
+      && entry.windows[0].window === "weekly" && entry.windows[0].amount === "68", "注入 loader 后路由成功映射 Codex 配额")
+    assert(entry.ref === void 0 && entry.error === void 0, "成功路径无 ref/error")
+    assert(!JSON.stringify(filtered).includes("eyJ") && !JSON.stringify(filtered).includes("sk-"), "过滤响应无 token/Key 泄漏")
+  } finally {
+    setCodexConnectLoader(void 0)
+  }
+}
+
+console.log("== 15. opencode-go：OpenCode Go 套餐配额（5h + weekly）==")
+{
+  // 真实双窗口响应：percent 为「已用百分比」，rolling → 5h、weekly → 周，
+  // resetsAt → resetTime，monthly 忽略。
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    calls.push(u)
+    if (u.includes("/v1/usage")) return { ok: true, json: async () => ({
+      usage: {
+        rolling: { status: "ok", percent: 9, resetsAt: "2026-08-15T14:00:00Z" },
+        weekly: { status: "ok", percent: 12, resetsAt: "2026-08-17T00:00:00Z" },
+        monthly: { status: "ok", percent: 30, resetsAt: "2026-09-01T00:00:00Z" },
+      },
+    }) }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx, handler: getHandler } = makeCtx({ section: void 0, creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" } })
+  apply(ctx, {})
+  const body = await responseBody(getHandler)
+  const og = body.providers.find((p) => p.provider === "opencode-go")
+  assert(!!og && og.status === "ok" && og.kind === "quota", "opencode-go ok + quota")
+  assert(og.amount === "91" && og.limit === "100", "amount = 100 - used（91/100）")
+  assert(JSON.stringify(og.windows) === JSON.stringify([
+    { window: "5h", amount: "91", limit: "100", resetTime: "2026-08-15T14:00:00Z" },
+    { window: "weekly", amount: "88", limit: "100", resetTime: "2026-08-17T00:00:00Z" },
+  ]), "5h + weekly 双窗口（percent→remaining、resetsAt→resetTime、monthly 忽略）")
+  assert(calls.some((u) => u.includes("https://opencode.ai/zen/go/v1/usage")), "请求真实端点 https://opencode.ai/zen/go/v1/usage")
+  assert(!JSON.stringify(body).includes("sk-opencode"), "响应不含 Key 值")
+  globalThis.fetch = origFetch
+
+  // 真实接口可省略 status；percent 为数字字符串时也应正常解析。
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes("/v1/usage")) return { ok: true, json: async () => ({
+      usage: {
+        rolling: { percent: "9" },
+        weekly: { status: null, percent: "12" },
+      },
+    }) }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx: ctx2, handler: getHandler2 } = makeCtx({ section: void 0, creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" } })
+  apply(ctx2, {})
+  const body2 = await responseBody(getHandler2)
+  const og2 = body2.providers.find((p) => p.provider === "opencode-go")
+  assert(!!og2 && og2.status === "ok" && og2.windows[0].amount === "91" && og2.windows[1].amount === "88",
+    "status 缺失/null 的真实响应 + percent 数字字符串正常换算 remaining")
+  globalThis.fetch = origFetch
+
+  // 部分无效窗口：weekly status 非 ok → 跳过，保留 5h 窗口（部分可用）。
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes("/v1/usage")) return { ok: true, json: async () => ({
+      usage: {
+        rolling: { status: "ok", percent: 20, resetsAt: "2026-08-15T14:00:00Z" },
+        weekly: { status: "error" },
+      },
+    }) }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx: ctx3, handler: getHandler3 } = makeCtx({ section: void 0, creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" } })
+  apply(ctx3, {})
+  const body3 = await responseBody(getHandler3)
+  const og3 = body3.providers.find((p) => p.provider === "opencode-go")
+  assert(!!og3 && og3.status === "ok" && Array.isArray(og3.windows) && og3.windows.length === 1
+    && og3.windows[0].window === "5h" && og3.windows[0].amount === "80", "weekly 无效 → 跳过，保留有效 5h 窗口")
+  globalThis.fetch = origFetch
+
+  // 全部无效/越界 percent → 整体拒绝（稳定 error:unavailable）。
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes("/v1/usage")) return { ok: true, json: async () => ({
+      usage: {
+        rolling: { status: "ok", percent: 150 },
+        weekly: { status: "ok", percent: -5 },
+      },
+    }) }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx: ctx4, handler: getHandler4 } = makeCtx({ section: void 0, creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" } })
+  apply(ctx4, {})
+  const body4 = await responseBody(getHandler4)
+  const og4 = body4.providers.find((p) => p.provider === "opencode-go")
+  assert(!!og4 && og4.configured === true && og4.status === "error" && og4.error === "unavailable",
+    "percent 越界且无有效窗口 → error:unavailable（不透出底层信息）")
+  assert(!JSON.stringify(body4).includes("sk-opencode"), "失败响应不含 Key 值")
+  globalThis.fetch = origFetch
+
+  // 缺 usage / 非法 JSON → 稳定 error:unavailable。
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes("/v1/usage")) return { ok: true, json: async () => ({ usage: null }) }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx: ctx5, handler: getHandler5 } = makeCtx({ section: void 0, creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" } })
+  apply(ctx5, {})
+  const body5 = await responseBody(getHandler5)
+  const og5 = body5.providers.find((p) => p.provider === "opencode-go")
+  assert(!!og5 && og5.status === "error" && og5.error === "unavailable", "usage 缺失 → error:unavailable")
+  globalThis.fetch = origFetch
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes("/v1/usage")) return { ok: true, json: async () => { throw new Error("bad json") } }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx: ctx6, handler: getHandler6 } = makeCtx({ section: void 0, creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" } })
+  apply(ctx6, {})
+  const body6 = await responseBody(getHandler6)
+  const og6 = body6.providers.find((p) => p.provider === "opencode-go")
+  assert(!!og6 && og6.status === "error" && og6.error === "unavailable" && !JSON.stringify(body6).includes("bad json"),
+    "非法 JSON → error:unavailable，底层错误不外泄")
+  globalThis.fetch = origFetch
+
+  // provider 过滤：只查询 opencode-go，且只请求 /v1/usage 一次；全程使用桩 fetch。
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    calls.push(u)
+    if (u.includes("/v1/usage")) return { ok: true, json: async () => ({
+      usage: {
+        rolling: { percent: 9 },
+        weekly: { percent: 12 },
+      },
+    }) }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx: ctx7, handler: getHandler7 } = makeCtx({ section: void 0, creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" } })
+  apply(ctx7, {})
+  const filtered = await responseBody(getHandler7, "/plugins/llm-balance?providers=opencode-go")
+  assert(JSON.stringify(filtered.providers.map((e) => e.provider)) === JSON.stringify(["opencode-go"]), "过滤模式只查询 opencode-go")
+  assert(calls.length === 1 && calls[0].includes("/v1/usage"), "过滤模式只请求一次 /v1/usage")
+  globalThis.fetch = origFetch
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n失败 " + failures + " 项")

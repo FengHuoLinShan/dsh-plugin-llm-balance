@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-llm-balance",
-  "version": "0.2.1",
-  "description": "DSH（DeepSeek Harness）插件：页面右上角可拖动的 API 余额/配额悬浮卡片——自动发现 DeepSeek / Moonshot / Kimi For Coding 等 provider，按余额分档变色、实时刷新",
+  "version": "0.2.4",
+  "description": "DSH（DeepSeek Harness）插件：页面右上角可拖动的 API 余额/配额悬浮卡片——自动发现 DeepSeek / Moonshot / Kimi For Coding / OpenAI Codex（Codex Connect）/ OpenCode Go 等 provider，按余额分档变色、实时刷新",
   "type": "module",
   "main": "lib/index.js",
   "files": [
@@ -41,11 +41,25 @@
     "deepseek",
     "moonshot",
     "kimi",
+    "openai-codex",
+    "codex",
+    "chatgpt",
+    "oauth",
+    "opencode",
+    "opencode-go",
     "api-balance",
     "quota",
     "billing"
   ],
   "license": "MIT",
+  "peerDependencies": {
+    "dsh-codex-connect": ">=0.1.0-alpha.4.5"
+  },
+  "peerDependenciesMeta": {
+    "dsh-codex-connect": {
+      "optional": true
+    }
+  },
   "publishConfig": {
     "access": "public"
   }
