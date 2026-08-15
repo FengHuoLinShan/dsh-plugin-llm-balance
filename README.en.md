@@ -6,7 +6,7 @@
 
 A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin: a **draggable, minimal rounded card** (DeepSeek web style) pinned to the top-right of the Web GUI that **always shows the balance/quota of your most recently used providers (up to 3)** — recently used DeepSeek and Kimi For Coding appear side by side:
 
-- **Recent providers (≤3)**: collects the providers of all non-blank sessions (incremental cache, zero extra RPCs in steady state), ranked by each provider's most recent session activity (`updatedAt`), and keeps showing the top 3. New sessions bring new providers into view automatically; deleting a session removes its row.
+- **Recent providers (≤3)**: counts only successful model calls completed after the plugin is enabled and aggregates the three most recent distinct providers from persisted `sessions.list` projections. It does not scan old history, call `session.models`, or resume cold sessions.
 - **Balance-type** (DeepSeek / Moonshot platform) color-coded by amount:
 
   | Color | Balance | Meaning |
@@ -24,8 +24,8 @@ A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 
 ## How it works
 
-- **Host half** (`lib/index.js`): a Cordis plugin registering `GET /plugins/llm-balance` on the WebServer. It auto-discovers providers and resolves each provider's API key through `ctx.credentials` (the same env / `~/.dsh/.credentials.yaml` / `.env` seam as `llm-pi-ai`), then proxies the balance/quota query **server-side** — the browser never touches any key. Same-source provider ids (apiKeyEnv+baseURL) are queried only once. Failures return stable error codes only. Interface fields are parsed per the real official shapes: DeepSeek `total_balance` is a string, Kimi `limits[].window` is a `{duration, timeUnit}` object (300 min → `5h`, 7 days → `weekly`).
-- **Client half** (`lib/client.js`): a browser bundle registered into the `shell.overlay` slot declared by `ui-layout` (kind:list / root scope), mounted/unmounted by the slot lifecycle (auto-disposed on declaration collapse or plugin unload). It collects non-blank sessions from `sessions.list`, incrementally reads each session's provider and recency via `connection.api.sessions.models` (the callUnary `result.value` contract), and renders the top 3 providers. Styles are injected idempotently via the official `data-plugin-css` pattern; `react` comes from the host module table seed — zero external dependencies, no build step.
+- **Host half** (`lib/index.js`): registers the `llmBalanceRecentProviders` session projection and `GET /plugins/llm-balance`. The projection folds only post-enable `assistant/message` events and keeps up to three providers per session. The route accepts an optional `providers=a,b,c` filter while retaining the unfiltered compatibility response. API keys are resolved through `ctx.credentials` and used only server-side; same-source queries are deduplicated.
+- **Client half** (`lib/client.js`): aggregates the three most recent providers from every session's `projectionValues.llmBalanceRecentProviders` and queries balances only for those providers. It refreshes immediately on mount, provider-order changes, and visibility restoration; while visible it polls every 60 seconds by default. Dragging, click-to-refresh, and card rendering are unchanged.
 - **Supported provider APIs**:
 
   | provider id | API | Basis |
@@ -51,7 +51,7 @@ dsh plugin --profile web add "github:FengHuoLinShan/dsh-plugin-llm-balance#main"
 dsh plugin --profile web add /path/to/dsh-plugin-llm-balance
 
 # D (any version): from a tarball
-dsh plugin --profile web add ./dsh-plugin-llm-balance-0.2.0.tgz
+dsh plugin --profile web add ./dsh-plugin-llm-balance-0.2.1.tgz
 ```
 
 Restart the dsh service (plugin-set changes need a restart; afterwards client-bundle edits hot-reload via HMR), then refresh the page.

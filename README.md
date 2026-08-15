@@ -6,7 +6,7 @@
 
 DSH（DeepSeek Harness）通用插件：在 Web GUI 页面右上角显示一个**可拖动的极简圆角卡片**（DeepSeek 网页端风格），**常态化显示最近使用的 ≤3 个 provider** 的余额/配额——最近用过的 deepseek 与 kimi-coding 会同时显示，不足 3 个不硬凑：
 
-- **最近 3 个常态化显示**：收集全部非空白会话使用到的 provider（增量缓存，稳态零额外 RPC），按「该 provider 名下会话的最近活跃时间」降序取前 3 个持续展示；新会话带来新 provider 时按活跃度自动上位，会话删除后对应行消失。
+- **最近 3 个常态化显示**：仅统计插件启用后成功完成的模型调用，从 `sessions.list` 的持久化投影聚合最近 3 个不同 provider；不扫描旧历史、不调用 `session.models`、不恢复冷会话。
 - **余额型**（DeepSeek / Moonshot 平台）按金额分档变色：
 
   | 颜色 | 余额 | 含义 |
@@ -24,8 +24,8 @@ DSH（DeepSeek Harness）通用插件：在 Web GUI 页面右上角显示一个*
 
 ## 原理
 
-- **host 半身**（lib/index.js）：Cordis 插件，在 WebServer 注册 GET /plugins/llm-balance，自动发现 provider，每个 provider 经 ctx.credentials 解析各自的 API Key（env / ~/.dsh/.credentials.yaml / .env 同一 seam，与 llm-pi-ai 一致），由**服务端**代理查询余额/配额接口。同源（apiKeyEnv+baseURL）的 provider id 只请求一次。浏览器永不接触 API Key，失败只返回稳定错误码。接口字段按官方真实形状解析：DeepSeek `total_balance` 为字符串、Kimi `limits[].window` 为 `{duration, timeUnit}` 对象（300 分钟 → `5h`，7 天 → `weekly`），均归一化为统一口径。
-- **client 半身**（lib/client.js）：浏览器 bundle，注册到 ui-layout 声明的 `shell.overlay` 槽位（kind:list / root 作用域弹层容器），挂载与卸载由 slot 生命周期管理（声明折叠 / 插件卸载自动 dispose）；从 `sessions.list` 收集全部非空白会话，经 `connection.api.sessions.models`（callUnary 的 `result.value` 契约）增量读取各会话的 provider 与最近活跃时间（仅新会话触发查询，稳态零 RPC），按最近活跃度降序取前 3 个 provider 逐行渲染卡片；kimi 行按窗口（5h/周）显示双百分比。样式按官方 `data-plugin-css` 模式幂等注入；react 由宿主模块表 seed 提供，零外部依赖、无需构建。
+- **host 半身**（lib/index.js）：Cordis 插件，注册 `llmBalanceRecentProviders` 会话投影和 `GET /plugins/llm-balance`。投影仅折叠启用后的 `assistant/message`，每会话保留最近 3 个 provider；路由支持可选 `providers=a,b,c` 过滤，未传时保持全量响应兼容。每个 provider 经 `ctx.credentials` 解析 API Key，由**服务端**代理查询；同源请求去重，浏览器永不接触 API Key。
+- **client 半身**（lib/client.js）：从所有会话的 `projectionValues.llmBalanceRecentProviders` 聚合最近 3 个 provider，只查询这些 provider 的余额。首次挂载、顺序变化及标签页恢复可见时立即刷新；可见时默认每 60 秒刷新，隐藏时不轮询。样式、拖动和点击刷新保持不变。
 - **支持的 provider 接口**：
 
   | provider id | 接口 | 口径 |
@@ -53,7 +53,7 @@ dsh plugin --profile web add "github:FengHuoLinShan/dsh-plugin-llm-balance#main"
 dsh plugin --profile web add /path/to/dsh-plugin-llm-balance
 
 # 方式 D（备选，任意版本）：tarball 安装
-dsh plugin --profile web add ./dsh-plugin-llm-balance-0.2.0.tgz
+dsh plugin --profile web add ./dsh-plugin-llm-balance-0.2.1.tgz
 ```
 
 装完**重启 dsh 服务**（插件集合变更需重启生效；之后改动 client bundle 走 HMR 自动热更），

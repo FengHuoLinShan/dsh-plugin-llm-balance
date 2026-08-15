@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-llm-balance",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH（DeepSeek Harness）插件：页面右上角可拖动的 API 余额/配额悬浮卡片——自动发现 DeepSeek / Moonshot / Kimi For Coding 等 provider，按余额分档变色、实时刷新",
   "type": "module",
   "main": "lib/index.js",

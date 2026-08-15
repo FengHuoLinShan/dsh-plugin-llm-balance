@@ -2,7 +2,9 @@
  * dsh-plugin-llm-balance — host 半身自测（零依赖，node test/balance.test.mjs 运行）。
  *
  * 覆盖：
+ *  - 最近 provider 投影的启用时间、成功事件、去重、顺序和上限；
  *  - 多 provider 自动发现（内置表 ∪ llm-pi-ai settings ∪ 插件 config）；
+ *  - providers 查询过滤、输入校验与无参兼容；
  *  - 同源去重（deepseek / deepseek-official 只发一次余额请求）；
  *  - 余额型（deepseek）与配额型（kimi-coding）两种口径；
  *  - 真实接口形状：DeepSeek total_balance 为字符串；Kimi limits[].window 为
@@ -14,7 +16,12 @@
  *  - 配置归一化（非法值回退默认，零依赖）；
  *  - 响应绝不包含 Key 值。
  */
-import { apply, normalizeConfig } from "../lib/index.js"
+import {
+  apply,
+  normalizeConfig,
+  recentProvidersProjection,
+  requestedProviders,
+} from "../lib/index.js"
 
 let failures = 0
 function assert(cond, label) {
@@ -22,11 +29,15 @@ function assert(cond, label) {
   else { failures++; console.log("  FAIL " + label) }
 }
 
-function makeCtx({ section, creds }) {
+function makeCtx({ section, creds, resolved }) {
   let handler = void 0
   const ctx = {
     webServer: { register: (route) => { handler = route.handler } },
-    credentials: { resolve: async (ref) => (creds && creds[ref] ? { value: creds[ref] } : void 0) },
+    credentials: { resolve: async (ref) => {
+      resolved?.push(ref)
+      return creds && creds[ref] ? { value: creds[ref] } : void 0
+    } },
+    sessionProjections: { register: () => {} },
     get: (n) => n === "settings"
       ? (section ? { get: (ns) => ns === "llm-pi-ai" ? section : void 0 } : void 0)
       : void 0,
@@ -37,9 +48,11 @@ function makeCtx({ section, creds }) {
 
 const fakeRes = () => {
   let body
+  let status
   return {
-    res: { writeHead: () => {}, end: (s) => { body = JSON.parse(s) } },
+    res: { writeHead: (code) => { status = code }, end: (s) => { body = JSON.parse(s) } },
     body: () => body,
+    status: () => status,
   }
 }
 
@@ -65,18 +78,45 @@ globalThis.fetch = async (url) => {
 }
 
 async function callHandler(getHandler, url) {
-  const { res, body } = fakeRes()
-  getHandler()({ url: url || "/plugins/llm-balance" }, res)
-  await new Promise((r) => setTimeout(r, 30))
-  return body()
+  const response = fakeRes()
+  await getHandler()({ url: url || "/plugins/llm-balance" }, response.res)
+  return { body: response.body(), status: response.status() }
 }
 
-console.log("== 1. 内置发现 + 同源去重 + 配额/余额双口径 ==")
+const responseBody = async (handler, url) => (await callHandler(handler, url)).body
+
+console.log("== 1. 最近 provider 投影 ==")
+{
+  const projection = recentProvidersProjection(100)
+  let state = projection.init()
+  const assistant = (time, provider) => ({
+    type: "assistant/message",
+    time,
+    data: { message: { source: { kind: "model", provider, model: "test" } } },
+  })
+  const initial = state
+  state = projection.apply(state, assistant(99, "old"))
+  state = projection.apply(state, { type: "turn/end", time: 101, data: { reason: "error" } })
+  assert(state === initial, "忽略启用前事件、失败步骤和非 assistant 事件")
+  for (const [time, provider] of [[110, "a"], [120, "b"], [130, "a"], [140, "c"], [150, "d"]]) {
+    state = projection.apply(state, assistant(time, provider))
+  }
+  assert(JSON.stringify(projection.view(state)) === JSON.stringify([
+    { provider: "d", usedAt: 150 },
+    { provider: "c", usedAt: 140 },
+    { provider: "a", usedAt: 130 },
+  ]), "provider 去重、更新、顺序及最多三项")
+  let rejected = false
+  try { projection.schema.parse([{ provider: "a", usedAt: 1, extra: true }]) } catch { rejected = true }
+  assert(rejected, "投影输出严格校验")
+}
+
+console.log("== 2. 内置发现 + 同源去重 + 配额/余额双口径 ==")
 {
   calls.length = 0
   const { ctx, handler } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
-  const body = await callHandler(handler)
+  const body = await responseBody(handler)
   const byId = Object.fromEntries(body.providers.map((p) => [p.provider, p]))
   assert(!!byId["deepseek-official"] && byId["deepseek-official"].status === "ok", "deepseek-official ok")
   assert(!!byId["deepseek"] && byId["deepseek"].status === "ok", "deepseek ok")
@@ -95,36 +135,69 @@ console.log("== 1. 内置发现 + 同源去重 + 配额/余额双口径 ==")
   assert(!JSON.stringify(body).includes("sk-"), "响应不含 Key 值")
 }
 
-console.log("== 2. llm-pi-ai settings 自动发现（覆盖默认 env）==")
+console.log("== 3. llm-pi-ai settings 自动发现（覆盖默认 env）==")
 {
   calls.length = 0
   const section = { providers: { "kimi-coding": { apiKeyEnv: "KIMI_CODING_API_KEY" } } }
   const { ctx, handler: getHandler } = makeCtx({ section, creds: { KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
-  const body = await callHandler(getHandler)
+  const body = await responseBody(getHandler)
   const kimi = body.providers.find((p) => p.provider === "kimi-coding")
   assert(!!kimi && kimi.status === "ok" && kimi.kind === "quota", "settings 声明的 kimi-coding 被发现并查询")
 }
 
-console.log("== 3. 单 provider 兼容层（老配置）==")
+console.log("== 4. 单 provider 兼容层（老配置）==")
 {
   calls.length = 0
   const { ctx, handler: getHandler } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret" } })
   apply(ctx, { provider: "deepseek", apiKeyEnv: "DEEPSEEK_API_KEY" })
-  const body = await callHandler(getHandler)
+  const body = await responseBody(getHandler)
   assert(body.configured === true && body.provider === "deepseek" && body.status === "ok" && body.amount === "127.62", "顶层兼容字段 = config.provider 条目")
 }
 
-console.log("== 4. 全部未配置 → hidden 依据（providers 全 configured:false）==")
+console.log("== 5. providers 过滤、校验与兼容 ==")
+{
+  assert(requestedProviders("/plugins/llm-balance") === void 0, "未传 providers 保持全量模式")
+  assert(JSON.stringify(requestedProviders("/plugins/llm-balance?providers=b,a,b")) === JSON.stringify(["b", "a"]), "providers 稳定去重")
+  let rejected = false
+  try { requestedProviders("/plugins/llm-balance?providers=a,b,c,d") } catch { rejected = true }
+  assert(rejected, "providers 最多三项")
+
+  calls.length = 0
+  const resolved = []
+  const { ctx, handler } = makeCtx({
+    section: void 0,
+    creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" },
+    resolved,
+  })
+  apply(ctx, {})
+  const filtered = await responseBody(handler, "/plugins/llm-balance?providers=deepseek,kimi-coding")
+  assert(JSON.stringify(filtered.providers.map((entry) => entry.provider)) === JSON.stringify(["deepseek", "kimi-coding"]), "只查询指定 provider")
+
+  resolved.length = 0
+  const unknown = await responseBody(handler, "/plugins/llm-balance?providers=unknown-provider")
+  assert(unknown.providers[0]?.provider === "unknown-provider" && unknown.providers[0]?.configured === false && resolved.length === 0,
+    "未知 provider 不解析凭证也不访问外部接口")
+
+  calls.length = 0
+  const sameSource = await responseBody(handler, "/plugins/llm-balance?providers=deepseek,deepseek-official")
+  assert(sameSource.providers.length === 2 && calls.filter((url) => url.includes("/user/balance")).length === 1,
+    "过滤模式保留同源去重")
+
+  const invalid = await callHandler(handler, "/plugins/llm-balance?providers=a,b,c,d")
+  assert(invalid.status === 400 && invalid.body.error === "invalid_providers", "非法过滤器返回稳定 400 错误")
+}
+
+console.log("== 6. 全部未配置 → hidden 依据（providers 全 configured:false）==")
 {
   calls.length = 0
   const { ctx, handler: getHandler } = makeCtx({ section: void 0, creds: {} })
   apply(ctx, {})
-  const body = await callHandler(getHandler)
+  const body = await responseBody(getHandler)
   assert(body.providers.every((p) => p.configured === false), "无 Key 时所有 provider configured:false")
 }
 
-console.log("== 5. 配置归一化（非法值回退默认）==")
+console.log("== 7. 配置归一化（非法值回退默认）==")
 {
   const n = normalizeConfig({
     refreshMs: "abc",
@@ -140,16 +213,16 @@ console.log("== 5. 配置归一化（非法值回退默认）==")
   assert(normalizeConfig(void 0).refreshMs === 60000 && normalizeConfig(void 0).timeoutMs === 15000, "无配置时全部默认")
 }
 
-console.log("== 6. 非法配置下路由仍正常工作（兼容层回退 deepseek）==")
+console.log("== 8. 非法配置下路由仍正常工作（兼容层回退 deepseek）==")
 {
   calls.length = 0
   const { ctx, handler: getHandler } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret" } })
   apply(ctx, { provider: 42, apiKeyEnv: "", baseURL: null, timeoutMs: "abc" })
-  const body = await callHandler(getHandler)
+  const body = await responseBody(getHandler)
   assert(body.configured === true && body.provider === "deepseek" && body.status === "ok" && body.amount === "127.62", "非法配置回退默认后仍正常查询余额")
 }
 
-console.log("== 7. kimi 无 limits 旧响应 → 单窗口周限额（回退兼容）==")
+console.log("== 9. kimi 无 limits 旧响应 → 单窗口周限额（回退兼容）==")
 {
   calls.length = 0
   globalThis.fetch = async (url) => {
@@ -159,7 +232,7 @@ console.log("== 7. kimi 无 limits 旧响应 → 单窗口周限额（回退兼�
   }
   const { ctx, handler: getHandler } = makeCtx({ section: void 0, creds: { KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
-  const body = await callHandler(getHandler)
+  const body = await responseBody(getHandler)
   const kimi = body.providers.find((p) => p.provider === "kimi-coding")
   assert(!!kimi && kimi.status === "ok" && kimi.kind === "quota", "旧响应仍正常解析")
   assert(Array.isArray(kimi.windows) && kimi.windows.length === 1 && kimi.windows[0].window === "weekly"
@@ -167,7 +240,7 @@ console.log("== 7. kimi 无 limits 旧响应 → 单窗口周限额（回退兼�
   globalThis.fetch = origFetch
 }
 
-console.log("== 8. DeepSeek 数字余额兼容 + kimi limits 自带 weekly 去重 ==")
+console.log("== 10. DeepSeek 数字余额兼容 + kimi limits 自带 weekly 去重 ==")
 {
   calls.length = 0
   globalThis.fetch = async (url) => {
@@ -184,7 +257,7 @@ console.log("== 8. DeepSeek 数字余额兼容 + kimi limits 自带 weekly 去�
   }
   const { ctx, handler: getHandler } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
-  const body = await callHandler(getHandler)
+  const body = await responseBody(getHandler)
   const byId = Object.fromEntries(body.providers.map((p) => [p.provider, p]))
   assert(byId["deepseek"].status === "ok" && byId["deepseek"].amount === "3.5" && byId["deepseek"].currency === "USD", "数字 total_balance 同样解析")
   const kimi = byId["kimi-coding"]
@@ -192,6 +265,38 @@ console.log("== 8. DeepSeek 数字余额兼容 + kimi limits 自带 weekly 去�
   const ww = kimi.windows.find((w) => w.window === "weekly")
   assert(!!ww && ww.amount === "70" && ww.resetTime === "2026-08-22T00:00:00Z", "weekly 取 limits 明细（7 天 → weekly），不被顶层覆盖")
   globalThis.fetch = origFetch
+}
+
+console.log("== 11. client 跨会话聚合 ==")
+{
+  let clientExports
+  globalThis.window = {
+    __ModuleLoader__: {
+      load: (definition) => { clientExports = definition.factory(() => ({})) },
+    },
+  }
+  await import("../lib/client.js")
+  delete globalThis.window
+  const recent = clientExports.recentProvidersFromSnapshot({
+    ids: ["one", "two", "three"],
+    byId: {
+      one: { projectionValues: { llmBalanceRecentProviders: [
+        { provider: "deepseek", usedAt: 10 },
+        { provider: "kimi-coding", usedAt: 20 },
+      ] } },
+      two: { projectionValues: { llmBalanceRecentProviders: [
+        { provider: "deepseek", usedAt: 30 },
+        { provider: "alpha", usedAt: 20 },
+      ] } },
+      three: { projectionValues: { llmBalanceRecentProviders: [
+        { provider: "zeta", usedAt: 5 },
+      ] } },
+    },
+  })
+  assert(JSON.stringify(recent) === JSON.stringify(["deepseek", "alpha", "kimi-coding"]),
+    "同 provider 取最新时间，并列按 id 稳定排序后取三项")
+  const clientSource = await (await import("node:fs/promises")).readFile(new URL("../lib/client.js", import.meta.url), "utf8")
+  assert(!clientSource.includes(".sessions.models"), "client 不包含 session.models RPC")
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n失败 " + failures + " 项")
