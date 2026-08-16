@@ -16,6 +16,7 @@
  *    （5401s → "5401s"）、非法 credits.balance 拒绝、unlimited credits →
  *    有限 100/100、空/非法 usage 安全拒绝；
  *    注入 loader 验证模块缺失/不兼容/未登录/查询失败/成功路径；
+ *    DSH home 解析：$DSH_HOME 显式优先、缺省/空串回退标准 ~/.dsh；
  *    路由内置发现 + provider 过滤 + 响应无 token/Key 泄漏；
  *  - client 最近 3 个 provider 的成员集合实时更新、显示槽位保持稳定；
  *    openai-codex configured:false 显示「未登录」/tooltip「未登录 ChatGPT」、
@@ -29,8 +30,11 @@
  *  - 配置归一化（非法值回退默认，零依赖）；
  *  - 响应绝不包含 Key 值。
  */
+import { homedir } from "node:os"
+import { join } from "node:path"
 import {
   apply,
+  loadCodexConnect,
   mapOpenAICodexUsage,
   normalizeConfig,
   queryCodexQuota,
@@ -75,6 +79,10 @@ const fakeRes = () => {
 
 const calls = []
 const origFetch = globalThis.fetch
+// 路由测试不依赖运行机器是否恰好安装/登录了可选 Codex Connect；默认 loader
+// 的普通安装/link fallback 由第 13 节通过显式 seam 单独覆盖。
+const absentCodexConnectLoader = async () => { throw new Error("MODULE_NOT_FOUND") }
+setCodexConnectLoader(absentCodexConnectLoader)
 globalThis.fetch = async (url) => {
   calls.push(String(url))
   const u = String(url)
@@ -451,6 +459,73 @@ console.log("== 12. openai-codex：Codex Connect 配额映射（纯函数）==")
 
 console.log("== 13. openai-codex：queryCodexQuota 模块交互（注入 loader）==")
 {
+  // link 安装时裸包解析失败：从 $DSH_HOME/profiles/web 的 package.json 定位同级 peer。
+  const marker = { source: "profile" }
+  let requireBase
+  let resolvedName
+  let loadedHref
+  const linked = await loadCodexConnect({
+    loadBare: async () => { throw new Error("bare import failed") },
+    dshHome: "/tmp/dsh-home",
+    requireFrom: (filename) => {
+      requireBase = filename
+      return { resolve: (name) => { resolvedName = name; return "/tmp/profile-peer/index.js" } }
+    },
+    loadResolved: async (href) => { loadedHref = href; return marker },
+  })
+  assert(linked === marker && requireBase === "/tmp/dsh-home/profiles/web/package.json"
+    && resolvedName === "dsh-codex-connect" && loadedHref === "file:///tmp/profile-peer/index.js",
+  "link 安装裸 import 失败时从 web profile 解析 dsh-codex-connect")
+  let fallbackCalled = false
+  const bareMarker = { source: "bare" }
+  const bare = await loadCodexConnect({
+    loadBare: async () => bareMarker,
+    requireFrom: () => { fallbackCalled = true; throw new Error("must not resolve") },
+  })
+  assert(bare === bareMarker && fallbackCalled === false, "普通安装优先使用裸包 import，不触发 profile fallback")
+
+  // DSH home 解析：$DSH_HOME 未设置（或空串）→ 回退标准 ~/.dsh（node:os homedir）；
+  // 显式 $DSH_HOME 优先。临时改动环境变量 + 注入 requireFrom 捕获实际 base 路径，
+  // 不依赖运行机器的真实安装/登录状态（确定性回归）。
+  {
+    const savedDshHome = process.env.DSH_HOME
+    try {
+      const captureBase = async (label) => {
+        let base
+        const mod = await loadCodexConnect({
+          loadBare: async () => { throw new Error("bare import failed") },
+          requireFrom: (filename) => {
+            base = filename
+            return { resolve: (name) => name === "dsh-codex-connect" ? "/tmp/peer/index.js" : "/nope" }
+          },
+          loadResolved: async () => ({ source: label }),
+        })
+        return { mod, base }
+      }
+      const defaultBase = join(homedir(), ".dsh", "profiles", "web", "package.json")
+      delete process.env.DSH_HOME
+      const absent = await captureBase("default-home")
+      assert(absent.mod.source === "default-home" && absent.base === defaultBase,
+        "$DSH_HOME 未设置 → 回退标准 ~/.dsh home 定位 web profile")
+      process.env.DSH_HOME = ""
+      const emptyDshHome = await captureBase("default-home-empty")
+      assert(emptyDshHome.mod.source === "default-home-empty" && emptyDshHome.base === defaultBase,
+        "$DSH_HOME 为空串 → 同样回退标准 ~/.dsh")
+      process.env.DSH_HOME = "   "
+      const blankDshHome = await captureBase("default-home-blank")
+      assert(blankDshHome.mod.source === "default-home-blank" && blankDshHome.base === defaultBase,
+        "$DSH_HOME 仅含空白 → 同样回退标准 ~/.dsh")
+      process.env.DSH_HOME = "/tmp/env-dsh-home"
+      const explicit = await captureBase("env-home")
+      assert(explicit.mod.source === "env-home"
+        && explicit.base === "/tmp/env-dsh-home/profiles/web/package.json",
+        "显式 $DSH_HOME 优先于默认 ~/.dsh")
+    } finally {
+      if (savedDshHome === void 0) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = savedDshHome
+    }
+  }
+
   // 模块缺失（未安装 dsh-codex-connect）。
   const missing = await queryCodexQuota({ load: async () => { throw new Error("MODULE_NOT_FOUND") } })
   assert(missing.configured === false && missing.ref === "dsh-codex-connect", "模块缺失 → configured:false + 安全 ref")
@@ -524,7 +599,7 @@ console.log("== 14. openai-codex：路由集成（内置发现 + 过滤 + 无泄
     assert(entry.ref === void 0 && entry.error === void 0, "成功路径无 ref/error")
     assert(!JSON.stringify(filtered).includes("eyJ") && !JSON.stringify(filtered).includes("sk-"), "过滤响应无 token/Key 泄漏")
   } finally {
-    setCodexConnectLoader(void 0)
+    setCodexConnectLoader(absentCodexConnectLoader)
   }
 }
 
@@ -577,6 +652,30 @@ console.log("== 15. opencode-go：OpenCode Go 套餐配额（5h + weekly）==")
   const og2 = body2.providers.find((p) => p.provider === "opencode-go")
   assert(!!og2 && og2.status === "ok" && og2.windows[0].amount === "91" && og2.windows[1].amount === "88",
     "status 缺失/null 的真实响应 + percent 数字字符串正常换算 remaining")
+  globalThis.fetch = origFetch
+
+  // 兼容顶层 usage 窗口；模型 baseURL 已以 /v1 结尾时不重复拼接。
+  calls.length = 0
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    calls.push(u)
+    if (u === "https://opencode.ai/zen/go/v1/usage") return { ok: true, json: async () => ({
+      rolling: { status: "ok", percent: 9 },
+      weekly: { status: "ok", percent: 12 },
+    }) }
+    throw new Error("unexpected url " + u)
+  }
+  const { ctx: ctxTop, handler: getHandlerTop } = makeCtx({
+    section: { providers: { "opencode-go": { apiKeyEnv: "OPENCODE_GO_API_KEY", baseURL: "https://opencode.ai/zen/go/v1" } } },
+    creds: { OPENCODE_GO_API_KEY: "sk-opencode-secret" },
+  })
+  apply(ctxTop, {})
+  const bodyTop = await responseBody(getHandlerTop, "/plugins/llm-balance?providers=opencode-go")
+  const ogTop = bodyTop.providers[0]
+  assert(ogTop?.status === "ok" && ogTop.windows[0].amount === "91" && ogTop.windows[1].amount === "88",
+    "顶层 rolling/weekly 响应正常解析")
+  assert(calls.length === 1 && calls[0] === "https://opencode.ai/zen/go/v1/usage",
+    "baseURL 已含 /v1 时只追加 /usage")
   globalThis.fetch = origFetch
 
   // 部分无效窗口：weekly status 非 ok → 跳过，保留 5h 窗口（部分可用）。
