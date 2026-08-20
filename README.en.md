@@ -24,8 +24,8 @@ A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 
 ## How it works
 
-- **Host half** (`lib/index.js`): registers the `llmBalanceRecentProviders` session projection and `GET /plugins/llm-balance`. The projection folds only post-enable `assistant/message` events and keeps up to three providers per session. The route accepts an optional `providers=a,b,c` filter while retaining the unfiltered compatibility response. Except for `openai-codex`, API keys are resolved through `ctx.credentials` and used only server-side; same-source queries are deduplicated. `openai-codex` goes through the optional Codex Connect integration (see below).
-- **Client half** (`lib/client.js`): aggregates the three most recent providers from every session's `projectionValues.llmBalanceRecentProviders` and queries balances only for those providers. It refreshes immediately on mount, membership changes, and visibility restoration; recency-only order changes neither reorder rows nor trigger an extra request. While visible it polls every 60 seconds by default. Dragging, click-to-refresh, and card rendering are unchanged.
+- **Host half** (`lib/index.js`): registers the `llmBalanceRecentProviders` session projection and the loopback-only `/llm-balance` Connection RPC channel. The projection folds only post-enable `assistant/message` events and keeps up to three providers per session; the `fetch-all` endpoint accepts an optional `providers` array. Except for `openai-codex`, API keys are resolved through `ctx.credentials` and used only server-side; same-source queries are deduplicated. `openai-codex` goes through the optional Codex Connect integration (see below).
+- **Client half** (`lib/client.js`): aggregates the three most recent providers from every session's `projectionValues.llmBalanceRecentProviders` and queries balances for only those providers through Connection RPC. It refreshes immediately on mount, membership changes, and visibility restoration; recency-only order changes neither reorder rows nor trigger an extra request. While visible it polls every 60 seconds by default. Dragging, click-to-refresh, and card rendering are unchanged.
 - **Supported provider APIs**:
 
   | provider id | API | Basis |
@@ -46,6 +46,8 @@ A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 - **Security**: this plugin **never reads or copies** the OAuth document (`.openai-codex-auth.json`) directly; tokens never appear in responses, logs, or the page.
 
 ## Install
+
+Requires DSH `0.1.0-rc.7` or later, which provides dedicated Connection RPC channels.
 
 The plugin ships in the **official bundle form** (`dsh.bundle.patch` activation layer + `dsh.client` browser half, per the [official packaging doc](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)) — a single `dsh plugin add` both installs and activates it (auto-appended to the profile's `bundles` layer):
 
@@ -106,7 +108,7 @@ dsh plugin --profile web remove dsh-plugin-llm-balance   # removes dependency an
 - Balance endpoints are proxied by the server (same origin) — no CORS exposure, no key leakage.
 - **OpenAI Codex has no API key**: sign-in state and quota reads go entirely through `dsh-codex-connect`'s `OpenAICodexCredentialStore` wrapper; this plugin never reads or copies the OAuth document (`.openai-codex-auth.json`) directly, tokens never appear in responses, logs, or the page, and only the secret-free `OpenAICodexUsage` projection is mapped.
 - Balance/quota data comes from official APIs and may lag slightly; informational only.
-- **Trust boundary**: `/plugins/llm-balance` is a bare HTTP route on the WebServer — no auth, no pairing PIN; it relies on the webserver's default loopback bind. If bound to `--host 0.0.0.0`, LAN clients could read configuration facts such as which providers have keys configured and their balance/quota numbers (the response never contains key values). Keep the default loopback deployment. The route is a custom one because the `api-remotes` domain (`/api` trust fence) is generated at build time inside the DSH repo and cannot be extended by third-party standalone plugins.
+- **Trust boundary**: balance queries use the `/llm-balance` Connection RPC channel registered with `authority: "loopback"`. DSH validates the request authority before invoking the plugin handler, so LAN clients cannot read provider configuration state or balance/quota values even when the WebServer listens on a non-loopback address.
 
 ## License
 

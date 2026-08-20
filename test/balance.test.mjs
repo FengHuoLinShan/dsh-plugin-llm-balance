@@ -4,7 +4,7 @@
  * 覆盖：
  *  - 最近 provider 投影的启用时间、成功事件、去重、顺序和上限；
  *  - 多 provider 自动发现（内置表 ∪ llm-pi-ai settings ∪ 插件 config）；
- *  - providers 查询过滤、输入校验与无参兼容；
+ *  - loopback-only Connection RPC 注册、providers 过滤与 wire 输入校验；
  *  - 同源去重（deepseek / deepseek-official 只发一次余额请求）；
  *  - 余额型（deepseek）与配额型（kimi-coding）两种口径；
  *  - 真实接口形状：DeepSeek total_balance 为字符串；Kimi limits[].window 为
@@ -17,7 +17,7 @@
  *    有限 100/100、空/非法 usage 安全拒绝；
  *    注入 loader 验证模块缺失/不兼容/未登录/查询失败/成功路径；
  *    DSH home 解析：$DSH_HOME 显式优先、缺省/空串回退标准 ~/.dsh；
- *    路由内置发现 + provider 过滤 + 响应无 token/Key 泄漏；
+ *    RPC 内置发现 + provider 过滤 + 响应无 token/Key 泄漏；
  *  - client 最近 3 个 provider 的成员集合实时更新、显示槽位保持稳定；
  *    openai-codex configured:false 显示「未登录」/tooltip「未登录 ChatGPT」、
  *    查询失败「用量查询失败」，其余 provider 保持原文案；
@@ -52,34 +52,29 @@ function assert(cond, label) {
 
 function makeCtx({ section, creds, resolved }) {
   let handler = void 0
+  let registration = void 0
   const ctx = {
-    webServer: { register: (route) => { handler = route.handler } },
+    connection: { rpc: { handle: (channel, next, options) => {
+      handler = next
+      registration = { channel, options }
+      return async () => {}
+    } } },
     credentials: { resolve: async (ref) => {
       resolved?.push(ref)
       return creds && creds[ref] ? { value: creds[ref] } : void 0
     } },
-    sessionProjections: { register: () => {} },
+    sessionProjections: { register: () => () => {} },
     get: (n) => n === "settings"
       ? (section ? { get: (ns) => ns === "llm-pi-ai" ? section : void 0 } : void 0)
       : void 0,
     effect: (fn) => fn(),
   }
-  return { ctx, handler: () => handler }
-}
-
-const fakeRes = () => {
-  let body
-  let status
-  return {
-    res: { writeHead: (code) => { status = code }, end: (s) => { body = JSON.parse(s) } },
-    body: () => body,
-    status: () => status,
-  }
+  return { ctx, handler: () => handler, registration: () => registration }
 }
 
 const calls = []
 const origFetch = globalThis.fetch
-// 路由测试不依赖运行机器是否恰好安装/登录了可选 Codex Connect；默认 loader
+// RPC 测试不依赖运行机器是否恰好安装/登录了可选 Codex Connect；默认 loader
 // 的普通安装/link fallback 由第 13 节通过显式 seam 单独覆盖。
 const absentCodexConnectLoader = async () => { throw new Error("MODULE_NOT_FOUND") }
 setCodexConnectLoader(absentCodexConnectLoader)
@@ -103,12 +98,16 @@ globalThis.fetch = async (url) => {
 }
 
 async function callHandler(getHandler, url) {
-  const response = fakeRes()
-  await getHandler()({ url: url || "/plugins/llm-balance" }, response.res)
-  return { body: response.body(), status: response.status() }
+  const raw = new URL(url || "/", "http://dsh.local").searchParams.get("providers")
+  const payload = raw === null ? null : { providers: raw.split(",") }
+  return getHandler()("fetch-all", payload, new AbortController().signal)
 }
 
-const responseBody = async (handler, url) => (await callHandler(handler, url)).body
+const responseBody = async (handler, url) => {
+  const result = await callHandler(handler, url)
+  if (!result.ok) throw new Error(result.error.message)
+  return result.value
+}
 
 console.log("== 1. 最近 provider 投影 ==")
 {
@@ -139,8 +138,10 @@ console.log("== 1. 最近 provider 投影 ==")
 console.log("== 2. 内置发现 + 同源去重 + 配额/余额双口径 ==")
 {
   calls.length = 0
-  const { ctx, handler } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" } })
+  const { ctx, handler, registration } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
+  assert(registration().channel === "/llm-balance" && registration().options.authority === "loopback",
+    "余额 RPC 只接受 loopback authority")
   const body = await responseBody(handler)
   const byId = Object.fromEntries(body.providers.map((p) => [p.provider, p]))
   assert(!!byId["deepseek-official"] && byId["deepseek-official"].status === "ok", "deepseek-official ok")
@@ -182,10 +183,10 @@ console.log("== 4. 单 provider 兼容层（老配置）==")
 
 console.log("== 5. providers 过滤、校验与兼容 ==")
 {
-  assert(requestedProviders("/plugins/llm-balance") === void 0, "未传 providers 保持全量模式")
-  assert(JSON.stringify(requestedProviders("/plugins/llm-balance?providers=b,a,b")) === JSON.stringify(["b", "a"]), "providers 稳定去重")
+  assert(requestedProviders(null) === void 0, "null payload 保持全量模式")
+  assert(JSON.stringify(requestedProviders({ providers: ["b", "a", "b"] })) === JSON.stringify(["b", "a"]), "providers 稳定去重")
   let rejected = false
-  try { requestedProviders("/plugins/llm-balance?providers=a,b,c,d") } catch { rejected = true }
+  try { requestedProviders({ providers: ["a", "b", "c", "d"] }) } catch { rejected = true }
   assert(rejected, "providers 最多三项")
 
   calls.length = 0
@@ -210,7 +211,10 @@ console.log("== 5. providers 过滤、校验与兼容 ==")
     "过滤模式保留同源去重")
 
   const invalid = await callHandler(handler, "/plugins/llm-balance?providers=a,b,c,d")
-  assert(invalid.status === 400 && invalid.body.error === "invalid_providers", "非法过滤器返回稳定 400 错误")
+  assert(invalid.ok === false && invalid.error.code === "bad-request" && Array.isArray(invalid.error.details.issues),
+    "非法过滤器返回 wire-valid bad-request")
+  const unknownEndpoint = await handler()("unknown", null, new AbortController().signal)
+  assert(unknownEndpoint.ok === false && unknownEndpoint.error.code === "bad-request", "未知 RPC endpoint 被拒绝")
 }
 
 console.log("== 6. 全部未配置 → hidden 依据（providers 全 configured:false）==")
@@ -238,7 +242,7 @@ console.log("== 7. 配置归一化（非法值回退默认）==")
   assert(normalizeConfig(void 0).refreshMs === 60000 && normalizeConfig(void 0).timeoutMs === 15000, "无配置时全部默认")
 }
 
-console.log("== 8. 非法配置下路由仍正常工作（兼容层回退 deepseek）==")
+console.log("== 8. 非法配置下 RPC 仍正常工作（兼容层回退 deepseek）==")
 {
   calls.length = 0
   const { ctx, handler: getHandler } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret" } })
@@ -340,6 +344,32 @@ console.log("== 11. client 跨会话聚合 + 行文案 ==")
 
   const clientSource = await (await import("node:fs/promises")).readFile(new URL("../lib/client.js", import.meta.url), "utf8")
   assert(!clientSource.includes(".sessions.models"), "client 不包含 session.models RPC")
+  assert(!clientSource.includes('fetch("/plugins/llm-balance') && clientSource.includes("connection.rpc.call"),
+    "client 仅通过 Connection RPC 查询余额")
+  assert(JSON.stringify(clientExports.inject) === JSON.stringify(["slots", "sessions", "connection"]),
+    "client 声明 slots/sessions/connection 服务依赖")
+  let slotOptions
+  let rpcArgs
+  const scope = {
+    sessions: {},
+    connection: { rpc: { call: async (...args) => { rpcArgs = args; return { ok: true, value: {} } } } },
+    slots: {
+      inject: (_name, mount) => mount(),
+      register: (options) => { slotOptions = options; return () => {} },
+    },
+  }
+  clientExports.apply({ inject: (_deps, mount) => mount(scope) }, { refreshMs: 30000 })
+  const face = slotOptions.inject()
+  const signal = new AbortController().signal
+  await face.requestBalances(["deepseek"], signal)
+  assert(face.sessions === scope.sessions && face.refreshMs === 30000
+    && JSON.stringify(rpcArgs.slice(0, 3)) === JSON.stringify(["/llm-balance", "fetch-all", { providers: ["deepseek"] }])
+    && rpcArgs[3] === signal,
+  "slot 仅向组件注入普通 RPC 请求回调")
+
+  const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../package.json", import.meta.url), "utf8"))
+  assert(manifest.dsh.client.inject.includes("@deepseek-ai/dsh-client-connection"),
+    "dsh.client 声明 Connection package 依赖")
 
   // openai-codex 行文案：configured:false → 未登录 / 未登录 ChatGPT；失败 → 用量查询失败。
   assert(clientExports.rowValueText({ provider: "openai-codex", configured: false }) === "未登录", "openai-codex 未登录 → 行值显示 未登录")
@@ -573,7 +603,7 @@ console.log("== 13. openai-codex：queryCodexQuota 模块交互（注入 loader�
   assert(!JSON.stringify(fail).includes("network boom"), "底层错误信息不外泄")
 }
 
-console.log("== 14. openai-codex：路由集成（内置发现 + 过滤 + 无泄漏）==")
+console.log("== 14. openai-codex：RPC 集成（内置发现 + 过滤 + 无泄漏）==")
 {
   const { ctx, handler } = makeCtx({ section: void 0, creds: {} })
   apply(ctx, {})
@@ -595,7 +625,7 @@ console.log("== 14. openai-codex：路由集成（内置发现 + 过滤 + 无泄
     assert(JSON.stringify(filtered.providers.map((e) => e.provider)) === JSON.stringify(["openai-codex"]), "过滤模式只查询 openai-codex")
     const entry = filtered.providers[0]
     assert(entry.configured === true && entry.status === "ok" && entry.kind === "quota"
-      && entry.windows[0].window === "weekly" && entry.windows[0].amount === "68", "注入 loader 后路由成功映射 Codex 配额")
+      && entry.windows[0].window === "weekly" && entry.windows[0].amount === "68", "注入 loader 后 RPC 成功映射 Codex 配额")
     assert(entry.ref === void 0 && entry.error === void 0, "成功路径无 ref/error")
     assert(!JSON.stringify(filtered).includes("eyJ") && !JSON.stringify(filtered).includes("sk-"), "过滤响应无 token/Key 泄漏")
   } finally {

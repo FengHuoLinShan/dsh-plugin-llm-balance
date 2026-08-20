@@ -24,8 +24,8 @@ DSH（DeepSeek Harness）通用插件：在 Web GUI 页面右上角显示一个*
 
 ## 原理
 
-- **host 半身**（lib/index.js）：Cordis 插件，注册 `llmBalanceRecentProviders` 会话投影和 `GET /plugins/llm-balance`。投影仅折叠启用后的 `assistant/message`，每会话保留最近 3 个 provider；路由支持可选 `providers=a,b,c` 过滤，未传时保持全量响应兼容。除 openai-codex 外，每个 provider 经 `ctx.credentials` 解析 API Key，由**服务端**代理查询；同源请求去重，浏览器永不接触 API Key。openai-codex 走 Codex Connect 可选集成（见下）。
-- **client 半身**（lib/client.js）：从所有会话的 `projectionValues.llmBalanceRecentProviders` 聚合最近 3 个 provider，只查询这些 provider 的余额。首次挂载、最近成员集合变化及标签页恢复可见时立即刷新；仅 recency 顺序变化不会重排或额外请求。可见时默认每 60 秒刷新，隐藏时不轮询。样式、拖动和点击刷新保持不变。
+- **host 半身**（lib/index.js）：Cordis 插件，注册 `llmBalanceRecentProviders` 会话投影和 loopback-only `/llm-balance` Connection RPC。投影仅折叠启用后的 `assistant/message`，每会话保留最近 3 个 provider；`fetch-all` endpoint 接收可选 `providers` 数组。除 openai-codex 外，每个 provider 经 `ctx.credentials` 解析 API Key，由**服务端**代理查询；同源请求去重，浏览器永不接触 API Key。openai-codex 走 Codex Connect 可选集成（见下）。
+- **client 半身**（lib/client.js）：从所有会话的 `projectionValues.llmBalanceRecentProviders` 聚合最近 3 个 provider，经 Connection RPC 只查询这些 provider 的余额。首次挂载、最近成员集合变化及标签页恢复可见时立即刷新；仅 recency 顺序变化不会重排或额外请求。可见时默认每 60 秒刷新，隐藏时不轮询。样式、拖动和点击刷新保持不变。
 - **支持的 provider 接口**：
 
   | provider id | 接口 | 口径 |
@@ -50,6 +50,8 @@ DSH（DeepSeek Harness）通用插件：在 Web GUI 页面右上角显示一个*
 本插件是**官方 bundle 形态**（`dsh.bundle.patch` 声明激活层 + `dsh.client` 声明浏览器半身，
 见[官方打包文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)），
 `dsh plugin add` 一条命令即可安装并激活（自动加入 profile 的 bundles 层，无需手改任何文件）：
+
+需要 DSH `0.1.0-rc.7` 或更高版本（使用该版本引入的 Connection RPC 独立通道）。
 
 ```bash
 # 方式 A（推荐）：从 npm 安装（发布后）
@@ -99,7 +101,7 @@ dsh plugin --profile web add ./dsh-plugin-llm-balance-0.2.4.tgz
 
 多 provider 模式开箱即用：provider 清单自动来自内置表 + `llm-pi-ai` settings，key 从 DSH credentials 解析（`llm-pi-ai` 路由的 `apiKeyEnv`，或内置默认 `DEEPSEEK_API_KEY` / `MOONSHOT_API_KEY` / `KIMI_CODING_API_KEY` / `OPENCODE_GO_API_KEY`）；`openai-codex` 不需要 `apiKeyEnv` / `baseURL`（ChatGPT OAuth 由 Codex Connect 管理）。
 
-> 旧的单 provider 写法（`provider` + `apiKeyEnv`）完全兼容：顶层响应字段仍按 config.provider 条目返回。
+> 旧的单 provider 写法（`provider` + `apiKeyEnv`）继续兼容：RPC 响应顶层字段仍按 config.provider 条目返回。
 
 所有字段均为宽松校验：`refreshMs` / `timeoutMs` 非数字或非正数、`provider` / `apiKeyEnv` 非字符串或空串、`baseURL` 非字符串，一律回退默认值，不会导致插件启动失败（零依赖实现 `normalizeConfig`，语义等价于官方 Config schema 的非法值回退）。
 
@@ -135,4 +137,4 @@ dsh plugin --profile web remove dsh-plugin-llm-balance   # 移除依赖与 bundl
 - 余额接口由服务端代理（同源），不受浏览器 CORS 限制，也不暴露 Key。
 - **OpenAI Codex 无 API Key**：登录态与配额读取全部经由 `dsh-codex-connect` 的 `OpenAICodexCredentialStore` 封装，本插件从不直接读取/复制 OAuth 文档（`.openai-codex-auth.json`），token 不会出现在任何响应、日志或页面中；映射的是无密钥的 `OpenAICodexUsage` 投影。
 - 余额/配额数据来自官方接口，可能略有延迟，仅供参考。
-- **信任边界**：`/plugins/llm-balance` 是 WebServer 上的裸 HTTP 路由——无认证、无配对 PIN，仅依赖 webserver 默认的 loopback 绑定。若以 `--host 0.0.0.0` 绑定到局域网，LAN 客户端可读取「哪些 provider 配了 Key、余额/配额数字」等配置事实（响应不含任何 Key 值）。建议保持默认 loopback 部署。之所以不采用 api-remotes 领域（`/api` 信任围栏内的标准数据通道）：该机制是 DSH 仓库内 build-time 生成（`/remote` 制品 + 组合挂载点），第三方独立插件无法扩展，故以自定义路由 + 本文档信任边界说明替代。
+- **信任边界**：余额查询使用 `/llm-balance` Connection RPC，并以 `authority: "loopback"` 注册。DSH 在进入插件 handler 前校验请求 authority；即使 WebServer 监听非回环地址，LAN 客户端也不能读取 provider 配置状态或余额/配额数字。
