@@ -797,5 +797,34 @@ console.log("== 15. opencode-go：OpenCode Go 套餐配额（5h + weekly）==")
   globalThis.fetch = origFetch
 }
 
+console.log("== 16. DeepSeek 峰谷电价徽标（2026-08-17 新规则）==")
+{
+  let peakClient
+  globalThis.window = { __ModuleLoader__: { load: (definition) => { peakClient = definition.factory(() => ({})) } } }
+  await import(new URL("../lib/client.js?peak=1", import.meta.url).href)
+  delete globalThis.window
+
+  const peak = peakClient.deepSeekPeakInfo
+  const at = (iso) => peak(Date.parse(iso))
+  // 高峰：北京时间 09:00–12:00 / 14:00–18:00（UTC 01:00–04:00 / 06:00–10:00）。
+  assert(JSON.stringify(at("2026-08-17T01:00:00Z")) === JSON.stringify({ offPeak: false, minutesLeft: 180 }), "09:00 高峰开始")
+  assert(JSON.stringify(at("2026-08-17T00:59:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 1 }), "08:59 仍为低谷")
+  assert(JSON.stringify(at("2026-08-17T04:00:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 120 }), "12:00 进入午间低谷")
+  assert(JSON.stringify(at("2026-08-17T05:30:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 30 }), "13:30 午间低谷倒计时")
+  assert(JSON.stringify(at("2026-08-17T06:00:00Z")) === JSON.stringify({ offPeak: false, minutesLeft: 240 }), "14:00 午后高峰开始")
+  assert(JSON.stringify(at("2026-08-17T10:00:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 900 }), "18:00 高峰结束")
+  assert(JSON.stringify(at("2026-08-16T16:30:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 510 }), "00:30 跨午夜倒计时到 09:00")
+
+  const span = peakClient.fmtSpanMin
+  assert(span(150) === "2h30m" && span(120) === "2h" && span(45) === "45m" && span(0) === "1m", "分钟倒计时文案")
+
+  const isDs = peakClient.isDeepSeekBalance
+  assert(isDs({ provider: "deepseek", kind: "balance" }) && isDs({ provider: "deepseek-official", kind: "balance" }), "deepseek/deepseek-official 余额行挂徽标")
+  assert(!isDs({ provider: "moonshotai", kind: "balance" }) && !isDs({ provider: "kimi-coding", kind: "quota" }), "其他 provider 不挂徽标")
+
+  const clientSource = await (await import("node:fs/promises")).readFile(new URL("../lib/client.js", import.meta.url), "utf8")
+  assert(clientSource.includes("dsh-balance-peak"), "client 注入峰谷徽标样式")
+}
+
 console.log(failures === 0 ? "\n全部通过" : "\n失败 " + failures + " 项")
 process.exit(failures === 0 ? 0 : 1)
