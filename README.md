@@ -4,28 +4,34 @@
 >
 > [English](README.en.md) | 中文
 
-DSH（DeepSeek Harness）通用插件：在 Web GUI 页面右上角显示一个**可拖动的极简圆角卡片**（DeepSeek 网页端风格），**常态化显示最近使用的 ≤3 个 provider** 的余额/配额——在 deepseek、kimi-coding、openai-codex（Codex Connect）、opencode-go（OpenCode Go）等 provider 中取最近使用的最多 3 个同时显示，不足 3 个不硬凑：
+DSH（DeepSeek Harness）的余额与配额悬浮卡片。它会在 Web GUI 中常驻显示最近使用的最多 3 个 provider，让余额、套餐余量和重置时间一眼可见。
 
-- **最近 3 个常态化显示**：仅统计插件启用后成功完成的模型调用，从 `sessions.list` 的持久化投影聚合最近 3 个不同 provider；成员集合实时更新，但已显示 provider 保持固定槽位，重复使用不会重排，新 provider 只替换被淘汰项的原槽位。不扫描旧历史、不调用 `session.models`、不恢复冷会话。
-- **余额型**（DeepSeek / Moonshot 平台）按金额分档变色：
+![余额与配额悬浮卡片](assets/llm-balance-preview.png)
 
-  | 颜色 | 余额 | 含义 |
-  |---|---|---|
-  | 🟢 绿 | >= 100 | 余额充足 |
-  | 🟡 黄 | 20 ~ 99 | 余额一般 |
-  | 🔴 红 | 1 ~ 19 | 余额偏低 |
-  | ⚪ 灰 | < 1 | 余额不足；或查询失败 / 加载中 |
+## 功能
 
-- **配额型**（Kimi For Coding 套餐 / OpenAI Codex 的 Codex Connect 配额 / OpenCode Go 套餐）按剩余比例分档：绿 >= 50%，黄 20~50%，红 5~20%，灰 < 5%；套餐用量按窗口细分，行内**同时显示 5h 限额与周限额的百分比**（如 `5h 68% · 周 74%`，各窗口按自身比例独立着色），行状态点取最低百分比窗口（保守）；tooltip 逐窗口显示「剩余 x/y（p%）· 重置日期」+ 套餐等级；旧响应无窗口明细时回退为单窗口周限额。Codex 的 5h/周限额本身即剩余百分比（limit=100，如 `5h 74% · 周 68%`），可选显示「月」月配额与「Credits」段（`credits.unlimited=true` 时仅因百分比 UI 显示为有限 100/100——绿色 100% 而非灰色 ∞/∞，账户本身仍无限）。OpenCode Go 的 rolling/weekly 窗口 `percent` 为已用百分比（amount=100-percent、limit=100，如 `5h 91% · 周 88%`），`resetsAt` 显示为重置时间，monthly 忽略。
-- **自动发现**：可查 provider = 内置接口表（deepseek / deepseek-official / moonshotai / moonshotai-cn / kimi-coding / openai-codex / opencode-go）∪ settings 命名空间 `llm-pi-ai.providers.*`（llm-pi-ai 已配 apiKeyEnv 的路由，如 `kimi-coding`）∪ 本插件 config 声明的 provider；无需逐个配置。
-- **拖动**：按住卡片可拖到任意位置，位置记忆在浏览器 localStorage 中，刷新后保持。
-- **点击**：立即刷新。
-- **轮询**：默认每 60 秒刷新一次；标签页隐藏时暂停，回到前台立即刷新。
+- **自动跟随最近使用的 provider**：只记录插件启用后成功完成的模型调用，显示最近 3 个不同 provider；已有项目保持槽位稳定，新项目只替换被淘汰项。
+- **同时支持余额与配额**：金额余额按数值显示；套餐配额同时展示 5 小时、周等可用窗口及重置时间，状态颜色按最紧张的窗口计算。
+- **自动发现配置**：合并内置 provider、`llm-pi-ai.providers.*` 和本插件配置，无需逐个添加。
+- **轻量交互**：卡片可拖动并记忆位置；点击即可刷新；默认每 60 秒自动刷新，页面隐藏时暂停、恢复可见时立即更新。
+- **凭据不出服务端**：API Key 和 OAuth token 不会发送到浏览器；余额查询通过仅允许 loopback 权限的 Connection RPC 完成。
+
+### 支持范围
+
+| Provider | 展示内容 | 凭据来源 |
+|---|---|---|
+| DeepSeek / DeepSeek Official | CNY 余额 | DSH credentials |
+| Moonshot / Moonshot CN | CNY 余额 | DSH credentials |
+| Kimi For Coding | 5h、周配额与套餐等级 | DSH credentials |
+| OpenAI Codex | 5h、周、可选月配额与 Credits | Codex Connect 的 ChatGPT OAuth |
+| OpenCode Go | 5h、周配额 | DSH credentials |
+
+余额颜色：绿 `>=100`，黄 `20–99`，红 `1–19`，灰 `<1`。配额颜色：绿 `>=50%`，黄 `20–49%`，红 `5–19%`，灰 `<5%`；加载或查询失败同样显示灰色。
 
 ## 原理
 
-- **host 半身**（lib/index.js）：Cordis 插件，注册 `llmBalanceRecentProviders` 会话投影和 loopback-only `/llm-balance` Connection RPC。投影仅折叠启用后的 `assistant/message`，每会话保留最近 3 个 provider；`fetch-all` endpoint 接收可选 `providers` 数组。除 openai-codex 外，每个 provider 经 `ctx.credentials` 解析 API Key，由**服务端**代理查询；同源请求去重，浏览器永不接触 API Key。openai-codex 走 Codex Connect 可选集成（见下）。
-- **client 半身**（lib/client.js）：从所有会话的 `projectionValues.llmBalanceRecentProviders` 聚合最近 3 个 provider，经 Connection RPC 只查询这些 provider 的余额。首次挂载、最近成员集合变化及标签页恢复可见时立即刷新；仅 recency 顺序变化不会重排或额外请求。可见时默认每 60 秒刷新，隐藏时不轮询。样式、拖动和点击刷新保持不变。
+- **服务端**（`lib/index.js`）：记录最近使用的 provider，通过 loopback-only Connection RPC 代理余额查询、解析凭据并对同源请求去重。
+- **浏览器端**（`lib/client.js`）：聚合最近 3 个 provider，只请求当前需要展示的数据，并负责刷新、着色、拖动和位置记忆。
 - **支持的 provider 接口**：
 
   | provider id | 接口 | 口径 |
