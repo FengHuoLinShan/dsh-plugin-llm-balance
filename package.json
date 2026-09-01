@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-llm-balance",
-  "version": "0.2.4",
-  "description": "DSH（DeepSeek Harness）插件：页面右上角可拖动的 API 余额/配额悬浮卡片——自动发现 DeepSeek / Moonshot / Kimi For Coding / OpenAI Codex（Codex Connect）/ OpenCode Go 等 provider，按余额分档变色、实时刷新",
+  "version": "0.3.0",
+  "description": "DSH（DeepSeek Harness）插件：自动跟随最近 provider 的可拖动 API 余额与 Coding Plan 配额卡片，凭据仅在服务端使用",
   "type": "module",
   "main": "lib/index.js",
   "files": [
@@ -52,6 +52,10 @@
     "oauth",
     "opencode",
     "opencode-go",
+    "openrouter",
+    "minimax",
+    "zai",
+    "bigmodel",
     "api-balance",
     "quota",
     "billing"

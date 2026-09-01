@@ -4,7 +4,7 @@
  * 覆盖：
  *  - 最近 provider 投影的启用时间、成功事件、去重、顺序和上限；
  *  - 多 provider 自动发现（内置表 ∪ llm-pi-ai settings ∪ 插件 config）；
- *  - loopback-only Connection RPC 注册、providers 过滤与 wire 输入校验；
+ *  - DSH 0.1.1 loopback / 0.1.2 BrowserAuth RPC 注册、providers 过滤与 wire 输入校验；
  *  - 同源去重（deepseek / deepseek-official 只发一次余额请求）；
  *  - 余额型（deepseek）与配额型（kimi-coding）两种口径；
  *  - 真实接口形状：DeepSeek total_balance 为字符串；Kimi limits[].window 为
@@ -50,19 +50,32 @@ function assert(cond, label) {
   else { failures++; console.log("  FAIL " + label) }
 }
 
-function makeCtx({ section, creds, resolved }) {
+function makeCtx({ section, creds, records, resolved, recordsRead, rpcArity = 3 }) {
   let handler = void 0
   let registration = void 0
-  const ctx = {
-    connection: { rpc: { handle: (channel, next, options) => {
+  const register = rpcArity === 2
+    ? function (channel, next) {
       handler = next
-      registration = { channel, options }
+      registration = { channel, options: void 0, args: arguments.length }
       return async () => {}
-    } } },
-    credentials: { resolve: async (ref) => {
-      resolved?.push(ref)
-      return creds && creds[ref] ? { value: creds[ref] } : void 0
-    } },
+    }
+    : function (channel, next, options) {
+      handler = next
+      registration = { channel, options, args: arguments.length }
+      return async () => {}
+    }
+  const ctx = {
+    connection: { rpc: { handle: register } },
+    credentials: {
+      resolve: async (ref) => {
+        resolved?.push(ref)
+        return creds && creds[ref] ? { value: creds[ref] } : void 0
+      },
+      readRecord: async (key) => {
+        recordsRead?.push(key)
+        return records && records[key]
+      },
+    },
     sessionProjections: { register: () => () => {} },
     get: (n) => n === "settings"
       ? (section ? { get: (ns) => ns === "llm-pi-ai" ? section : void 0 } : void 0)
@@ -125,14 +138,18 @@ console.log("== 1. 最近 provider 投影 ==")
   for (const [time, provider] of [[110, "a"], [120, "b"], [130, "a"], [140, "c"], [150, "d"]]) {
     state = projection.apply(state, assistant(time, provider))
   }
-  assert(JSON.stringify(projection.view(state)) === JSON.stringify([
+  assert(JSON.stringify(projection.wire.view(state)) === JSON.stringify([
     { provider: "d", usedAt: 150 },
     { provider: "c", usedAt: 140 },
     { provider: "a", usedAt: 130 },
   ]), "provider 去重、更新、顺序及最多三项")
   let rejected = false
-  try { projection.schema.parse([{ provider: "a", usedAt: 1, extra: true }]) } catch { rejected = true }
+  try { projection.wire.viewSchema.parse([{ provider: "a", usedAt: 1, extra: true }]) } catch { rejected = true }
   assert(rejected, "投影输出严格校验")
+  rejected = false
+  try { projection.stateSchema.parse({ startedAt: 100, providers: [], extra: true }) } catch { rejected = true }
+  assert(rejected && projection.stateSchema.parse(state) === state, "checkpoint state 独立严格校验")
+  assert(projection.schema === void 0 && projection.view === void 0, "不保留 0.1.0 旧投影契约")
 }
 
 console.log("== 2. 内置发现 + 同源去重 + 配额/余额双口径 ==")
@@ -141,7 +158,7 @@ console.log("== 2. 内置发现 + 同源去重 + 配额/余额双口径 ==")
   const { ctx, handler, registration } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
   assert(registration().channel === "/llm-balance" && registration().options.authority === "loopback",
-    "余额 RPC 只接受 loopback authority")
+    "DSH 0.1.1 RPC 保留 loopback authority")
   const body = await responseBody(handler)
   const byId = Object.fromEntries(body.providers.map((p) => [p.provider, p]))
   assert(!!byId["deepseek-official"] && byId["deepseek-official"].status === "ok", "deepseek-official ok")
@@ -824,6 +841,211 @@ console.log("== 16. DeepSeek 峰谷电价徽标（2026-08-17 新规则）==")
 
   const clientSource = await (await import("node:fs/promises")).readFile(new URL("../lib/client.js", import.meta.url), "utf8")
   assert(clientSource.includes("dsh-balance-peak"), "client 注入峰谷徽标样式")
+}
+
+console.log("== 17. DSH 新 RPC + credential record + opaque grant ==")
+{
+  const modern = makeCtx({ section: void 0, creds: {}, rpcArity: 2 })
+  apply(modern.ctx, {})
+  assert(modern.registration().channel === "/llm-balance" && modern.registration().args === 2
+    && modern.registration().options === void 0, "DSH 0.1.2 使用两参数 BrowserAuth RPC")
+
+  let auth
+  globalThis.fetch = async (url, options) => {
+    auth = options.headers.Authorization
+    return { ok: true, json: async () => ({ data: { limit: 100, limit_remaining: 75, limit_reset: "monthly" } }) }
+  }
+  const resolved = []
+  const recordsRead = []
+  const stored = makeCtx({
+    section: { providers: { openrouter: {} } },
+    creds: {},
+    records: { "llm-pi-ai/openrouter": { kind: "api-key", key: "record-secret" } },
+    resolved,
+    recordsRead,
+  })
+  apply(stored.ctx, {})
+  const storedBody = await responseBody(stored.handler, "/plugins/llm-balance?providers=openrouter")
+  assert(storedBody.providers[0]?.status === "ok" && auth === "Bearer record-secret"
+    && resolved.length === 0 && recordsRead.includes("llm-pi-ai/openrouter"), "stored api-key record 优先于默认 env")
+
+  auth = void 0
+  recordsRead.length = 0
+  const explicit = makeCtx({
+    section: { providers: { openrouter: { apiKeyEnv: "CUSTOM_OPENROUTER_KEY" } } },
+    creds: { CUSTOM_OPENROUTER_KEY: "explicit-secret" },
+    records: { "llm-pi-ai/openrouter": { kind: "api-key", key: "wrong-record-secret" } },
+    recordsRead,
+  })
+  apply(explicit.ctx, {})
+  await responseBody(explicit.handler, "/plugins/llm-balance?providers=openrouter")
+  assert(auth === "Bearer explicit-secret" && recordsRead.length === 0, "显式 apiKeyEnv 不回退 credential record")
+
+  let fetched = false
+  globalThis.fetch = async () => { fetched = true; throw new Error("must not fetch") }
+  const opaque = makeCtx({
+    section: { providers: { anthropic: {} } },
+    creds: {},
+    records: { "llm-pi-ai/anthropic": { kind: "grant", payload: { access: "oauth-secret" } } },
+  })
+  apply(opaque.ctx, {})
+  const opaqueBody = await responseBody(opaque.handler, "/plugins/llm-balance?providers=anthropic")
+  assert(opaqueBody.providers[0]?.configured === true && opaqueBody.providers[0]?.status === "no_balance_api"
+    && fetched === false && !JSON.stringify(opaqueBody).includes("oauth-secret"), "opaque grant 只报告已配置且绝不解析/发送")
+
+  const nativeCodex = makeCtx({
+    section: { providers: { "openai-codex": {} } },
+    creds: {},
+    records: { "llm-pi-ai/openai-codex": { kind: "grant", payload: { access: "codex-native-secret" } } },
+  })
+  apply(nativeCodex.ctx, {})
+  const codexBody = await responseBody(nativeCodex.handler, "/plugins/llm-balance?providers=openai-codex")
+  assert(codexBody.providers[0]?.configured === true && codexBody.providers[0]?.status === "no_balance_api"
+    && !JSON.stringify(codexBody).includes("codex-native-secret"), "DSH 原生 Codex OAuth 回退为安全的 no_balance_api")
+
+  let modernClient
+  globalThis.window = { __ModuleLoader__: { load: (definition) => { modernClient = definition.factory(() => ({})) } } }
+  await import(new URL("../lib/client.js?modern=1", import.meta.url).href)
+  delete globalThis.window
+  assert(modernClient.rowTitle(codexBody.providers[0]).includes("配额查询需 Codex Connect"), "Codex 原生登录 tooltip 给出安全桥接提示")
+  globalThis.fetch = origFetch
+}
+
+console.log("== 18. OpenRouter + MiniMax global/CN ==")
+{
+  const seen = []
+  globalThis.fetch = async (url, options) => {
+    const u = String(url)
+    seen.push({ url: u, auth: options.headers.Authorization })
+    if (u === "https://openrouter.ai/api/v1/key") {
+      return { ok: true, json: async () => ({ data: { limit: "100", limit_remaining: "74.5", limit_reset: "monthly" } }) }
+    }
+    if (u === "https://www.minimax.io/v1/token_plan/remains") {
+      return { ok: true, json: async () => ({ model_remains: [{
+        model_name: "general",
+        current_interval_remaining_percent: 0.6,
+        end_time: 1788264000,
+        current_weekly_remaining_percent: 25,
+        weekly_end_time: 1788696000000,
+      }] }) }
+    }
+    if (u === "https://www.minimaxi.com/v1/token_plan/remains") {
+      return { ok: true, json: async () => ({ data: { model_remains: [{
+        model_name: "MiniMax-M2.7",
+        current_interval_status: 3,
+        current_weekly_status: 3,
+      }] } }) }
+    }
+    throw new Error("unexpected url " + u)
+  }
+  const ctx = makeCtx({
+    section: { providers: { openrouter: {}, minimax: {}, "minimax-cn": {} } },
+    creds: {},
+    records: {
+      "llm-pi-ai/openrouter": { kind: "api-key", key: "or-secret" },
+      "llm-pi-ai/minimax": { kind: "api-key", key: "mm-secret" },
+      "llm-pi-ai/minimax-cn": { kind: "api-key", key: "mm-cn-secret" },
+    },
+  })
+  apply(ctx.ctx, {})
+  const body = await responseBody(ctx.handler, "/plugins/llm-balance?providers=openrouter,minimax,minimax-cn")
+  const byId = Object.fromEntries(body.providers.map((entry) => [entry.provider, entry]))
+  assert(byId.openrouter.windows[0].window === "monthly" && byId.openrouter.amount === "74.5", "OpenRouter Key 月限额解析")
+  assert(byId.minimax.windows[0].window === "5h" && byId.minimax.windows[0].amount === "60"
+    && byId.minimax.windows[1].window === "weekly" && byId.minimax.windows[1].amount === "25", "MiniMax global 5h/周窗口解析")
+  assert(byId["minimax-cn"].windows.every((window) => window.amount === "100"), "MiniMax CN 无限窗口映射为绿色 100%")
+  assert(seen.length === 3 && seen.every((entry) => entry.auth.startsWith("Bearer "))
+    && !JSON.stringify(body).includes("secret"), "三条固定官方端点均使用服务端 Bearer 且响应无 Key")
+
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: { limit: null, limit_remaining: null } }) })
+  const unlimited = makeCtx({
+    section: { providers: { openrouter: {} } }, creds: {},
+    records: { "llm-pi-ai/openrouter": { kind: "api-key", key: "or-secret" } },
+  })
+  apply(unlimited.ctx, {})
+  const unlimitedBody = await responseBody(unlimited.handler, "/plugins/llm-balance?providers=openrouter")
+  assert(unlimitedBody.providers[0]?.status === "no_balance_api", "OpenRouter Key 未设限时不伪造余额")
+  globalThis.fetch = origFetch
+}
+
+console.log("== 19. Z.AI/BigModel + Moonshot global/CN ==")
+{
+  const seen = []
+  globalThis.fetch = async (url, options) => {
+    const u = String(url)
+    seen.push({ url: u, auth: options.headers.Authorization })
+    if (u.includes("/api/monitor/usage/quota/limit")) {
+      const cn = u.startsWith("https://open.bigmodel.cn")
+      return { ok: true, json: async () => ({ data: { limits: [
+        { type: "TOKENS_LIMIT", unit: 3, percentage: cn ? 40.5 : 20, nextResetTime: 1788264000000 },
+        { type: "CREDIT_LIMIT", unit: 6, usage: 100, currentValue: 30, nextResetTime: 1788696000000 },
+        { type: "TIME_LIMIT", unit: 9, percentage: 99 },
+      ] } }) }
+    }
+    if (u.includes("/v1/users/me/balance")) {
+      return { ok: true, json: async () => ({ code: 0, status: true, data: { available_balance: 42 } }) }
+    }
+    throw new Error("unexpected url " + u)
+  }
+  const zai = makeCtx({
+    section: { providers: { zai: {}, "zai-coding-cn": {} } }, creds: {},
+    records: {
+      "llm-pi-ai/zai": { kind: "api-key", key: "zai-raw-secret" },
+      "llm-pi-ai/zai-coding-cn": { kind: "api-key", key: "bigmodel-raw-secret" },
+    },
+  })
+  apply(zai.ctx, {})
+  const zaiBody = await responseBody(zai.handler, "/plugins/llm-balance?providers=zai,zai-coding-cn")
+  const byId = Object.fromEntries(zaiBody.providers.map((entry) => [entry.provider, entry]))
+  assert(byId.zai.windows[0].amount === "80" && byId.zai.windows[1].amount === "70", "Z.AI used percentage 转剩余 5h/周")
+  assert(byId["zai-coding-cn"].windows[0].amount === "59.5" && byId["zai-coding-cn"].windows.length === 2, "BigModel 小数百分比兼容且忽略 TIME_LIMIT")
+  assert(seen[0].auth === "zai-raw-secret" && seen[1].auth === "bigmodel-raw-secret"
+    && !JSON.stringify(zaiBody).includes("raw-secret"), "Z.AI 两区域使用 raw Authorization 且响应无 Key")
+
+  seen.length = 0
+  const moonshot = makeCtx({
+    section: { providers: { moonshotai: {}, "moonshotai-cn": {} } }, creds: {},
+    records: {
+      "llm-pi-ai/moonshotai": { kind: "api-key", key: "moon-global-secret" },
+      "llm-pi-ai/moonshotai-cn": { kind: "api-key", key: "moon-cn-secret" },
+    },
+  })
+  apply(moonshot.ctx, {})
+  const moonBody = await responseBody(moonshot.handler, "/plugins/llm-balance?providers=moonshotai,moonshotai-cn")
+  assert(seen.some((entry) => entry.url === "https://api.moonshot.ai/v1/users/me/balance")
+    && seen.some((entry) => entry.url === "https://api.moonshot.cn/v1/users/me/balance")
+    && moonBody.providers.every((entry) => entry.status === "ok"), "Moonshot global/CN 主机正确且不重复 /v1")
+
+  globalThis.fetch = async () => ({ ok: true, json: async () => { throw new Error("bad-zai-json") } })
+  const malformed = makeCtx({
+    section: { providers: { zai: {} } }, creds: {},
+    records: { "llm-pi-ai/zai": { kind: "api-key", key: "zai-secret" } },
+  })
+  apply(malformed.ctx, {})
+  const malformedBody = await responseBody(malformed.handler, "/plugins/llm-balance?providers=zai")
+  assert(malformedBody.providers[0]?.status === "error" && malformedBody.providers[0]?.error === "unavailable"
+    && !JSON.stringify(malformedBody).includes("bad-zai-json"), "新增 provider 非法 JSON 收敛为稳定错误")
+
+  globalThis.fetch = async () => ({ ok: false, status: 503 })
+  const unavailable = makeCtx({
+    section: { providers: { zai: {} } }, creds: {},
+    records: { "llm-pi-ai/zai": { kind: "api-key", key: "zai-secret" } },
+  })
+  apply(unavailable.ctx, {})
+  const unavailableBody = await responseBody(unavailable.handler, "/plugins/llm-balance?providers=zai")
+  assert(unavailableBody.providers[0]?.status === "error" && unavailableBody.providers[0]?.error === "unavailable", "新增 provider HTTP 失败收敛为稳定错误")
+  globalThis.fetch = origFetch
+}
+
+console.log("== 20. 截图声明与发布元数据 ==")
+{
+  const fs = await import("node:fs/promises")
+  const screenshots = JSON.parse(await fs.readFile(new URL("../screenshots.json", import.meta.url), "utf8"))
+  const manifest = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"))
+  let assetExists = true
+  try { await fs.access(new URL("../" + screenshots[0], import.meta.url)) } catch { assetExists = false }
+  assert(JSON.stringify(screenshots) === JSON.stringify(["assets/llm-balance-preview.png"]) && assetExists, "screenshots.json 精确指向现有预览图")
+  assert(manifest.version === "0.3.0" && !manifest.files.includes("screenshots.json"), "0.3.0 且截图声明保持仓库级元数据")
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n失败 " + failures + " 项")
