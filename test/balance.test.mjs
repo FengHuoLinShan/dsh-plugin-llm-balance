@@ -831,6 +831,9 @@ console.log("== 16. DeepSeek 峰谷电价徽标（2026-08-17 新规则）==")
   assert(JSON.stringify(at("2026-08-17T06:00:00Z")) === JSON.stringify({ offPeak: false, minutesLeft: 240 }), "14:00 午后高峰开始")
   assert(JSON.stringify(at("2026-08-17T10:00:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 900 }), "18:00 高峰结束")
   assert(JSON.stringify(at("2026-08-16T16:30:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 510 }), "00:30 跨午夜倒计时到 09:00")
+  assert(JSON.stringify(at("2026-09-12T01:00:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 2880 }), "周六全天低谷，倒计时到周一 09:00")
+  assert(JSON.stringify(at("2026-09-13T06:00:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 1140 }), "周日全天低谷，倒计时到周一 09:00")
+  assert(JSON.stringify(at("2026-09-11T10:00:00Z")) === JSON.stringify({ offPeak: true, minutesLeft: 3780 }), "周五 18:00 后倒计时到周一 09:00")
 
   const span = peakClient.fmtSpanMin
   assert(span(150) === "2h30m" && span(120) === "2h" && span(45) === "45m" && span(0) === "1m", "分钟倒计时文案")

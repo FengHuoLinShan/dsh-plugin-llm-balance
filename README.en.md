@@ -17,7 +17,7 @@ A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
   | ⚪ Gray | < 1 | Depleted; or query failure / loading |
 
 - **Quota-type** (Kimi, Codex Connect, OpenCode Go, OpenRouter Key limits, MiniMax Token Plan, and Z.AI/BigModel Coding Plan) is color-coded by remaining ratio: green >= 50%, yellow 20–50%, red 5–20%, gray < 5%. Multi-window plans show 5h, daily, weekly, or monthly percentages and reset times; the status dot uses the lowest remaining window.
-- **DeepSeek peak/off-peak pill**: DeepSeek balance rows carry a small `低谷/高峰` (off-peak/peak) badge — since 2026-08-17, peak hours are 09:00–12:00 and 14:00–18:00 Beijing time, and every other hour (including the 12:00–14:00 midday valley) is half price. Pure wall-clock math with no extra requests; the tooltip shows the schedule plus a countdown to the next switch, and the pill refreshes with the existing balance polling and visibility-resume refresh. Rows without a configured key carry no pill.
+- **DeepSeek peak/off-peak pill**: DeepSeek balance rows carry a small `低谷/高峰` (off-peak/peak) badge — since 2026-08-17, peak hours are 09:00–12:00 and 14:00–18:00 Beijing time on weekdays, and every other time (including weekends) is half price. Pure wall-clock math with no extra requests; the tooltip shows the schedule plus a countdown to the next switch, and the pill refreshes with the existing balance polling and visibility-resume refresh. Rows without a configured key carry no pill.
 - **Auto-discovery**: queryable providers come from the built-in usage table, `llm-pi-ai.providers.*`, and the plugin's compatibility config.
 - **Drag** anywhere; the position is remembered in `localStorage`.
 - **Click** to refresh immediately.
