@@ -4,7 +4,7 @@
  * 覆盖：
  *  - 最近 provider 投影的启用时间、成功事件、去重、顺序和上限；
  *  - 多 provider 自动发现（内置表 ∪ llm-pi-ai settings ∪ 插件 config）；
- *  - DSH 0.1.1 loopback / 0.1.2 BrowserAuth RPC 注册、providers 过滤与 wire 输入校验；
+ *  - /api/llm-balance 精确 Fetch 路由注册（含坏信封 400）、providers 过滤与 wire 输入校验；
  *  - 同源去重（deepseek / deepseek-official 只发一次余额请求）；
  *  - 余额型（deepseek）与配额型（kimi-coding）两种口径；
  *  - 真实接口形状：DeepSeek total_balance 为字符串；Kimi limits[].window 为
@@ -50,22 +50,18 @@ function assert(cond, label) {
   else { failures++; console.log("  FAIL " + label) }
 }
 
-function makeCtx({ section, creds, records, resolved, recordsRead, rpcArity = 3 }) {
-  let handler = void 0
-  let registration = void 0
-  const register = rpcArity === 2
-    ? function (channel, next) {
-      handler = next
-      registration = { channel, options: void 0, args: arguments.length }
-      return async () => {}
-    }
-    : function (channel, next, options) {
-      handler = next
-      registration = { channel, options, args: arguments.length }
-      return async () => {}
-    }
+function makeCtx({ section, creds, records, resolved, recordsRead }) {
+  let fetchRoute = void 0
+  const disposals = { registerDisposed: 0, effectCleanups: [] }
   const ctx = {
-    connection: { rpc: { handle: register } },
+    connection: {
+      fetch: {
+        register: (route) => {
+          fetchRoute = route
+          return async () => { disposals.registerDisposed += 1 }
+        },
+      },
+    },
     credentials: {
       resolve: async (ref) => {
         resolved?.push(ref)
@@ -80,9 +76,20 @@ function makeCtx({ section, creds, records, resolved, recordsRead, rpcArity = 3 
     get: (n) => n === "settings"
       ? (section ? { get: (ns) => ns === "llm-pi-ai" ? section : void 0 } : void 0)
       : void 0,
-    effect: (fn) => fn(),
+    effect: (fn) => { disposals.effectCleanups.push(fn()) },
   }
-  return { ctx, handler: () => handler, registration: () => registration }
+  // 把捕获的 Fetch 路由包装成旧 RPC handler 同签名的可调用对象，历史调用点零改动。
+  const handler = () => async (endpoint, payload, signal) => {
+    const request = new Request("http://dsh.local" + fetchRoute.path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ method: endpoint, payload: payload ?? null }),
+      signal,
+    })
+    const response = await fetchRoute.fetch(request)
+    return await response.json()
+  }
+  return { ctx, handler, fetchRoute: () => fetchRoute, disposals }
 }
 
 const calls = []
@@ -155,10 +162,27 @@ console.log("== 1. 最近 provider 投影 ==")
 console.log("== 2. 内置发现 + 同源去重 + 配额/余额双口径 ==")
 {
   calls.length = 0
-  const { ctx, handler, registration } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" } })
+  const { ctx, handler, fetchRoute } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret", KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
-  assert(registration().channel === "/llm-balance" && registration().options.authority === "loopback",
-    "DSH 0.1.1 RPC 保留 loopback authority")
+  const route = fetchRoute()
+  assert(route.path === "/api/llm-balance" && JSON.stringify(route.methods) === JSON.stringify(["POST"]),
+    "通道经 connection.fetch.register 挂 /api 精确 Fetch 路由（rpc.handle 在 0.1.5-rc.2+ 失效）")
+  {
+    const bad = await route.fetch(new Request("http://dsh.local/api/llm-balance", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ method: "bogus" }),
+    }))
+    const badBody = await bad.json()
+    assert(bad.status === 400 && badBody.ok === false, "非法信封收敛为 400 + ok:false")
+    const notJson = await route.fetch(new Request("http://dsh.local/api/llm-balance", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not-json{",
+    }))
+    const notJsonBody = await notJson.json()
+    assert(notJson.status === 400 && notJsonBody.ok === false, "非 JSON body 收敛为 400 + ok:false")
+  }
   const body = await responseBody(handler)
   const byId = Object.fromEntries(body.providers.map((p) => [p.provider, p]))
   assert(!!byId["deepseek-official"] && byId["deepseek-official"].status === "ok", "deepseek-official ok")
@@ -176,6 +200,16 @@ console.log("== 2. 内置发现 + 同源去重 + 配额/余额双口径 ==")
   const dsCalls = calls.filter((u) => u.includes("/user/balance"))
   assert(dsCalls.length === 1, "deepseek/deepseek-official 同源只请求一次 (got " + dsCalls.length + ")")
   assert(!JSON.stringify(body).includes("sk-"), "响应不含 Key 值")
+}
+
+console.log("== 2b. Fetch 路由 dispose 接线 ==")
+{
+  const { ctx, disposals } = makeCtx({ section: void 0, creds: { DEEPSEEK_API_KEY: "sk-ds-secret" } })
+  apply(ctx, {})
+  assert(disposals.effectCleanups.length >= 1 && disposals.effectCleanups.every((fn) => typeof fn === "function"),
+    "apply 经 ctx.effect 登记清理函数")
+  for (const cleanup of disposals.effectCleanups) await cleanup()
+  assert(disposals.registerDisposed === 1, "effect 清理会调用 fetch.register 的 dispose(路由卸载)")
 }
 
 console.log("== 3. llm-pi-ai settings 自动发现（覆盖默认 env）==")
@@ -361,32 +395,43 @@ console.log("== 11. client 跨会话聚合 + 行文案 ==")
 
   const clientSource = await (await import("node:fs/promises")).readFile(new URL("../lib/client.js", import.meta.url), "utf8")
   assert(!clientSource.includes(".sessions.models"), "client 不包含 session.models RPC")
-  assert(!clientSource.includes('fetch("/plugins/llm-balance') && clientSource.includes("connection.rpc.call"),
-    "client 仅通过 Connection RPC 查询余额")
-  assert(JSON.stringify(clientExports.inject) === JSON.stringify(["slots", "sessions", "connection"]),
-    "client 声明 slots/sessions/connection 服务依赖")
+  assert(clientSource.includes("fetch(RPC_PATH") && !clientSource.includes("connection.rpc.call"),
+    "client 经 /api Fetch 路由查询余额（不再依赖 rpc.handle 通道）")
+  assert(JSON.stringify(clientExports.inject) === JSON.stringify(["slots", "sessions"]),
+    "client 声明 slots/sessions 服务依赖")
   let slotOptions
-  let rpcArgs
+  let fetchArgs
   const scope = {
     sessions: {},
-    connection: { rpc: { call: async (...args) => { rpcArgs = args; return { ok: true, value: {} } } } },
     slots: {
       inject: (_name, mount) => mount(),
       register: (options) => { slotOptions = options; return () => {} },
     },
   }
-  clientExports.apply({ inject: (_deps, mount) => mount(scope) }, { refreshMs: 30000 })
-  const face = slotOptions.inject()
-  const signal = new AbortController().signal
-  await face.requestBalances(["deepseek"], signal)
-  assert(face.sessions === scope.sessions && face.refreshMs === 30000
-    && JSON.stringify(rpcArgs.slice(0, 3)) === JSON.stringify(["/llm-balance", "fetch-all", { providers: ["deepseek"] }])
-    && rpcArgs[3] === signal,
-  "slot 仅向组件注入普通 RPC 请求回调")
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    fetchArgs = { url, options }
+    return { ok: true, json: async () => ({ ok: true, value: {} }) }
+  }
+  let face
+  try {
+    clientExports.apply({ inject: (_deps, mount) => mount(scope) }, { refreshMs: 30000 })
+    face = slotOptions.inject()
+    const signal = new AbortController().signal
+    await face.requestBalances(["deepseek"], signal)
+    assert(face.sessions === scope.sessions && face.refreshMs === 30000
+      && fetchArgs.url === "/api/llm-balance" && fetchArgs.options.method === "POST"
+      && JSON.stringify(JSON.parse(fetchArgs.options.body)) === JSON.stringify({ method: "fetch-all", payload: { providers: ["deepseek"] } })
+      && fetchArgs.options.signal === signal,
+    "slot 仅向组件注入 /api 同源 Fetch 请求回调")
+  } finally {
+    globalThis.fetch = realFetch
+  }
 
   const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../package.json", import.meta.url), "utf8"))
-  assert(manifest.dsh.client.inject.includes("@deepseek-ai/dsh-client-connection"),
-    "dsh.client 声明 Connection package 依赖")
+  assert(!manifest.dsh.client.inject.includes("@deepseek-ai/dsh-client-connection")
+    && manifest.dsh.client.inject.includes("@deepseek-ai/dsh-client-runtime"),
+    "client 不再声明 Connection package 依赖（通道走 /api Fetch 路由）")
 
   // openai-codex 行文案：configured:false → 未登录 / 未登录 ChatGPT；失败 → 用量查询失败。
   assert(clientExports.rowValueText({ provider: "openai-codex", configured: false }) === "未登录", "openai-codex 未登录 → 行值显示 未登录")
@@ -848,10 +893,10 @@ console.log("== 16. DeepSeek 峰谷电价徽标（2026-08-17 新规则）==")
 
 console.log("== 17. DSH 新 RPC + credential record + opaque grant ==")
 {
-  const modern = makeCtx({ section: void 0, creds: {}, rpcArity: 2 })
+  const modern = makeCtx({ section: void 0, creds: {} })
   apply(modern.ctx, {})
-  assert(modern.registration().channel === "/llm-balance" && modern.registration().args === 2
-    && modern.registration().options === void 0, "DSH 0.1.2 使用两参数 BrowserAuth RPC")
+  assert(modern.fetchRoute().path === "/api/llm-balance",
+    "新旧 DSH 版本统一走 /api Fetch 路由（不再依赖版本敏感的 rpc.handle 通道）")
 
   let auth
   globalThis.fetch = async (url, options) => {
@@ -1048,7 +1093,7 @@ console.log("== 20. 截图声明与发布元数据 ==")
   let assetExists = true
   try { await fs.access(new URL("../" + screenshots[0], import.meta.url)) } catch { assetExists = false }
   assert(JSON.stringify(screenshots) === JSON.stringify(["assets/llm-balance-preview.png"]) && assetExists, "screenshots.json 精确指向现有预览图")
-  assert(manifest.version === "0.3.0" && !manifest.files.includes("screenshots.json"), "0.3.0 且截图声明保持仓库级元数据")
+  assert(manifest.version === "0.4.0" && !manifest.files.includes("screenshots.json"), "0.4.0 且截图声明保持仓库级元数据")
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n失败 " + failures + " 项")

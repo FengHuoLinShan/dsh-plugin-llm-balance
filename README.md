@@ -34,7 +34,7 @@ DSH（DeepSeek Harness）的余额与配额悬浮卡片。它会在 Web GUI 中�
 
 ## 原理
 
-- **服务端**（`lib/index.js`）：记录最近使用的 provider，通过 Connection RPC 代理余额查询，从显式 `apiKeyEnv` 或 `llm-pi-ai/<provider>` API-key record 取凭据，并对同源请求去重；OAuth grant 只判断已配置，不解析内容。
+- **服务端**（`lib/index.js`）：记录最近使用的 provider，通过 `/api/llm-balance` 精确 Fetch 路由代理余额查询，从显式 `apiKeyEnv` 或 `llm-pi-ai/<provider>` API-key record 取凭据，并对同源请求去重；OAuth grant 只判断已配置，不解析内容。
 - **浏览器端**（`lib/client.js`）：聚合最近 3 个 provider，只请求当前需要展示的数据，并负责刷新、着色、拖动和位置记忆。
 - **支持的 provider 接口**：
 
@@ -150,4 +150,5 @@ dsh plugin --profile web remove dsh-plugin-llm-balance   # 移除依赖与 bundl
 - 余额接口由服务端代理（同源），不受浏览器 CORS 限制，也不暴露 Key。
 - **OpenAI Codex 无 API Key**：配额读取经由 `dsh-codex-connect` 的 `OpenAICodexCredentialStore` 封装；DSH 原生 `llm-pi-ai` grant 只用于判断已登录，本插件不解析、复制或刷新其 OAuth payload。
 - 余额/配额数据来自官方接口，可能略有延迟，仅供参考。
-- **信任边界**：余额查询使用 `/llm-balance` Connection RPC。DSH 0.1.1 以 `authority: "loopback"` 注册；0.1.2 的两参数 RPC 由宿主统一 BrowserAuth，在进入插件 handler 前完成认证。
+- **信任边界**：余额查询走 dsh-client-connection 的 `/api` 共享通道下的 `/api/llm-balance` 精确 Fetch 路由——Host/Origin 围栏与宿主统一 BrowserAuth 在进入插件 handler 前完成（与官方 `/api` 路由完全一致）。
+- **最低 DSH 版本**：0.2.0-alpha（`connection.fetch.register` 自该版本起可用；0.1.5-rc.x 同样可用，`connection.rpc.handle` 在 0.1.5-rc.2 起对第三方插件构造性损坏，本插件不再使用）。

@@ -25,8 +25,8 @@ A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 
 ## How it works
 
-- **Host half** (`lib/index.js`): registers the new DSH state/wire projection contract and the `/llm-balance` Connection RPC channel. Explicit `apiKeyEnv` references are authoritative; otherwise the plugin reads the `llm-pi-ai/<provider>` API-key record before falling back to the provider's default environment reference. OAuth grants are never interpreted. Same-source queries are deduplicated.
-- **Client half** (`lib/client.js`): aggregates the three most recent providers from every session's `projectionValues.llmBalanceRecentProviders` and queries balances for only those providers through Connection RPC. It refreshes immediately on mount, membership changes, and visibility restoration; recency-only order changes neither reorder rows nor trigger an extra request. While visible it polls every 60 seconds by default. Dragging, click-to-refresh, and card rendering are unchanged.
+- **Host half** (`lib/index.js`): registers the new DSH state/wire projection contract and the `/api/llm-balance` exact Fetch route (under dsh-client-connection's `/api` shared channel). Explicit `apiKeyEnv` references are authoritative; otherwise the plugin reads the `llm-pi-ai/<provider>` API-key record before falling back to the provider's default environment reference. OAuth grants are never interpreted. Same-source queries are deduplicated.
+- **Client half** (`lib/client.js`): aggregates the three most recent providers from every session's `projectionValues.llmBalanceRecentProviders` and queries balances for only those providers through same-origin `fetch('/api/llm-balance')`. It refreshes immediately on mount, membership changes, and visibility restoration; recency-only order changes neither reorder rows nor trigger an extra request. While visible it polls every 60 seconds by default. Dragging, click-to-refresh, and card rendering are unchanged.
 - **Supported provider APIs**:
 
   | provider id | API | Basis |
@@ -112,7 +112,8 @@ dsh plugin --profile web remove dsh-plugin-llm-balance   # removes dependency an
 - Balance endpoints are proxied by the server (same origin) — no CORS exposure, no key leakage.
 - **OpenAI Codex has no API key**: quota reads go through `dsh-codex-connect`'s `OpenAICodexCredentialStore`; a DSH-native `llm-pi-ai` grant is used only as a configured-state signal and its OAuth payload is never parsed, copied, or refreshed here.
 - Balance/quota data comes from official APIs and may lag slightly; informational only.
-- **Trust boundary**: balance queries use `/llm-balance` Connection RPC. DSH 0.1.1 registers it as loopback-only; DSH 0.1.2 authenticates it through the host's unified BrowserAuth before invoking the handler.
+- **Trust boundary**: balance queries use the `/api/llm-balance` exact Fetch route under dsh-client-connection's `/api` shared channel — Host/Origin fencing and the host's unified BrowserAuth complete before the plugin handler is invoked (identical to the official `/api` routes).
+- **Minimum DSH version**: 0.2.0-alpha (`connection.fetch.register` is available from that version; also works on 0.1.5-rc.x — `connection.rpc.handle` is broken by construction for third-party plugins since 0.1.5-rc.2, so this plugin no longer uses it).
 
 ## License
 

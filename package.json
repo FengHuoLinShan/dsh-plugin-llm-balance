@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-llm-balance",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DSH（DeepSeek Harness）插件：自动跟随最近 provider 的可拖动 API 余额与 Coding Plan 配额卡片，凭据仅在服务端使用",
   "type": "module",
   "main": "lib/index.js",
@@ -24,7 +24,6 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-cordis-client-runner"
       ]
