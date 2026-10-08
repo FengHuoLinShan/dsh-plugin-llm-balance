@@ -3,7 +3,8 @@
  *
  * 覆盖：
  *  - 最近 provider 投影的启用时间、成功事件、去重、顺序和上限；
- *  - 多 provider 自动发现（内置表 ∪ llm-pi-ai settings ∪ 插件 config）；
+ *  - 多 provider 自动发现（内置表 ∪ llm-pi-ai live 配置 ∪ 插件 config；
+ *    dsh 0.2.x configEditor fiber.config 优先，0.1.x settings.get 回退）；
  *  - /api/llm-balance 精确 Fetch 路由注册（含坏信封 400）、providers 过滤与 wire 输入校验；
  *  - 同源去重（deepseek / deepseek-official 只发一次余额请求）；
  *  - 余额型（deepseek）与配额型（kimi-coding）两种口径；
@@ -38,6 +39,7 @@ import {
   mapOpenAICodexUsage,
   normalizeConfig,
   queryCodexQuota,
+  readProviderSection,
   recentProvidersProjection,
   requestedProviders,
   setCodexConnectLoader,
@@ -50,7 +52,7 @@ function assert(cond, label) {
   else { failures++; console.log("  FAIL " + label) }
 }
 
-function makeCtx({ section, creds, records, resolved, recordsRead }) {
+function makeCtx({ section, creds, records, resolved, recordsRead, configEditorSection }) {
   let fetchRoute = void 0
   const disposals = { registerDisposed: 0, effectCleanups: [] }
   const ctx = {
@@ -75,7 +77,11 @@ function makeCtx({ section, creds, records, resolved, recordsRead }) {
     sessionProjections: { register: () => () => {} },
     get: (n) => n === "settings"
       ? (section ? { get: (ns) => ns === "llm-pi-ai" ? section : void 0 } : void 0)
-      : void 0,
+      : n === "configEditor"
+        ? (configEditorSection !== void 0
+            ? { entries: () => [{ options: { id: "llm-pi-ai" }, fiber: { config: configEditorSection } }] }
+            : void 0)
+        : void 0,
     effect: (fn) => { disposals.effectCleanups.push(fn()) },
   }
   // 把捕获的 Fetch 路由包装成旧 RPC handler 同签名的可调用对象，历史调用点零改动。
@@ -212,15 +218,72 @@ console.log("== 2b. Fetch 路由 dispose 接线 ==")
   assert(disposals.registerDisposed === 1, "effect 清理会调用 fetch.register 的 dispose(路由卸载)")
 }
 
-console.log("== 3. llm-pi-ai settings 自动发现（覆盖默认 env）==")
+console.log("== 3. llm-pi-ai 自动发现（dsh 0.2.x configEditor live 配置优先，0.1.x settings 回退）==")
 {
   calls.length = 0
+  // dsh 0.2.x：settings 服务是 SettingsForms（无 .get），配置从 configEditor 条目的 fiber.config 读。
+  const configEditorSection = { providers: { "kimi-coding": { apiKeyEnv: "KIMI_CODING_API_KEY" } } }
+  const { ctx, handler: getHandler } = makeCtx({ section: void 0, configEditorSection, creds: { KIMI_CODING_API_KEY: "sk-kimi-secret" } })
+  apply(ctx, {})
+  const body = await responseBody(getHandler)
+  const kimi = body.providers.find((p) => p.provider === "kimi-coding")
+  assert(!!kimi && kimi.status === "ok" && kimi.kind === "quota", "configEditor fiber.config 声明的 kimi-coding 被发现并查询")
+  const viaConfigEditor = readProviderSection(ctx)
+  assert(viaConfigEditor && viaConfigEditor.providers["kimi-coding"]?.apiKeyEnv === "KIMI_CODING_API_KEY",
+    "readProviderSection 走 configEditor 路径")
+}
+{
+  // dsh 0.2.x 下 settings.get 不存在（SettingsForms）：读不到不抛错，回退 undefined。
+  const legacySettingsForms = { configure() {}, describe() {} } // 无 .get
+  const ctx = { get: (n) => n === "settings" ? legacySettingsForms : void 0 }
+  assert(readProviderSection(ctx) === void 0, "SettingsForms（无 .get）下 readProviderSection 安全返回 undefined")
+  // 两者都缺失（非 profile 语境）同样安全。
+  const bareCtx = { get: () => void 0 }
+  assert(readProviderSection(bareCtx) === void 0, "服务全缺失时 readProviderSection 安全返回 undefined")
+  // get 抛错的服务同样安全（防御 ctx.get 对未注册服务的抛错变体）。
+  const throwingCtx = { get: () => { throw new Error("cannot get property without inject") } }
+  assert(readProviderSection(throwingCtx) === void 0, "ctx.get 抛错时 readProviderSection 安全返回 undefined")
+}
+{
+  // volatile 包装（schemastery .volatile() → cosmokit createVolatile：{ get }）：
+  // 整层包装与 resolved 层残留的可枚举 get 键都不产生幽灵 provider。
+  const inner = { providers: { "kimi-coding": { apiKeyEnv: "KIMI_CODING_API_KEY" } } }
+  const volatileSection = { get: () => inner } // 整个 section 是 volatile 容器
+  const ctxA = { get: (n) => n === "configEditor" ? { entries: () => [{ options: { id: "llm-pi-ai" }, fiber: { config: volatileSection } }] } : void 0 }
+  const unwrapped = readProviderSection(ctxA)
+  assert(unwrapped && unwrapped.providers["kimi-coding"] && Object.keys(unwrapped.providers).join(",") === "kimi-coding",
+    "volatile 容器整层解包（get() 内的 providers 被读取）")
+  const junkSection = { providers: { "kimi-coding": { apiKeyEnv: "KIMI_CODING_API_KEY" }, get: () => {}, junk: 42 } }
+  const ctxB = { get: (n) => n === "configEditor" ? { entries: () => [{ options: { id: "llm-pi-ai" }, fiber: { config: junkSection } }] } : void 0 }
+  const cleaned = readProviderSection(ctxB)
+  assert(Object.keys(cleaned.providers).join(",") === "kimi-coding", "resolved 层残留的 get / 非 object 条目被清洗")
+}
+{
+  calls.length = 0
+  // dsh 0.1.x：configEditor 缺失时回退旧 settings.get(ns) 路径。
   const section = { providers: { "kimi-coding": { apiKeyEnv: "KIMI_CODING_API_KEY" } } }
   const { ctx, handler: getHandler } = makeCtx({ section, creds: { KIMI_CODING_API_KEY: "sk-kimi-secret" } })
   apply(ctx, {})
   const body = await responseBody(getHandler)
   const kimi = body.providers.find((p) => p.provider === "kimi-coding")
-  assert(!!kimi && kimi.status === "ok" && kimi.kind === "quota", "settings 声明的 kimi-coding 被发现并查询")
+  assert(!!kimi && kimi.status === "ok" && kimi.kind === "quota", "settings 声明的 kimi-coding 被发现并查询（0.1.x 回退）")
+  const viaSettings = readProviderSection(ctx)
+  assert(viaSettings && viaSettings.providers["kimi-coding"]?.apiKeyEnv === "KIMI_CODING_API_KEY",
+    "readProviderSection 回退 settings.get 路径")
+}
+{
+  calls.length = 0
+  // 0.2.x configEditor 优先于旧 settings：两者都有时以 live 配置为准。
+  // section 声明的自定义 Key 未配置，configEditor 路径生效时 kimi 回退内置 env 并可查询。
+  const configEditorSection = { providers: { openrouter: {} } }
+  const section = { providers: { "kimi-coding": { apiKeyEnv: "CUSTOM_KIMI_KEY" } } }
+  const { ctx, handler: getHandler } = makeCtx({ section, configEditorSection, creds: { KIMI_CODING_API_KEY: "sk-kimi-secret" } })
+  apply(ctx, {})
+  const body = await responseBody(getHandler)
+  const kimi = body.providers.find((p) => p.provider === "kimi-coding")
+  const openrouter = body.providers.find((p) => p.provider === "openrouter")
+  assert(!!kimi && kimi.configured === true && kimi.status === "ok", "configEditor 存在时优先采用（kimi 回退内置 env 被查询）")
+  assert(!!openrouter, "configEditor 声明的 openrouter 被发现")
 }
 
 console.log("== 4. 单 provider 兼容层（老配置）==")
@@ -1093,7 +1156,7 @@ console.log("== 20. 截图声明与发布元数据 ==")
   let assetExists = true
   try { await fs.access(new URL("../" + screenshots[0], import.meta.url)) } catch { assetExists = false }
   assert(JSON.stringify(screenshots) === JSON.stringify(["assets/llm-balance-preview.png"]) && assetExists, "screenshots.json 精确指向现有预览图")
-  assert(manifest.version === "0.4.0" && !manifest.files.includes("screenshots.json"), "0.4.0 且截图声明保持仓库级元数据")
+  assert(manifest.version === "0.4.1" && !manifest.files.includes("screenshots.json"), "0.4.1 且截图声明保持仓库级元数据")
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n失败 " + failures + " 项")

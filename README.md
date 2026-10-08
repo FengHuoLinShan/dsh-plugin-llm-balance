@@ -112,7 +112,7 @@ dsh plugin --profile web add ./dsh-plugin-llm-balance-0.3.0.tgz
 | apiKeyEnv | DEEPSEEK_API_KEY | （兼容层）单 provider 模式的凭证引用名 |
 | baseURL | 按 provider 默认 | （兼容层）单 provider 模式的可选 base URL 覆盖 |
 
-多 provider 模式开箱即用：provider 清单来自内置表 + `llm-pi-ai` settings；显式 `apiKeyEnv` 只解析该引用，否则优先读取 `llm-pi-ai/<provider>` API-key record，再回退 provider 默认环境变量。OAuth grant 不被解析；`openai-codex` 配额由 Codex Connect 管理。
+多 provider 模式开箱即用：provider 清单来自内置表 + `llm-pi-ai` 的 live 配置（dsh 0.2.x 读 configEditor 条目配置，0.1.x 回退 settings 命名空间）；显式 `apiKeyEnv` 只解析该引用，否则优先读取 `llm-pi-ai/<provider>` API-key record，再回退 provider 默认环境变量。OAuth grant 不被解析；`openai-codex` 配额由 Codex Connect 管理。
 
 > 旧的单 provider 写法（`provider` + `apiKeyEnv`）继续兼容：RPC 响应顶层字段仍按 config.provider 条目返回。
 

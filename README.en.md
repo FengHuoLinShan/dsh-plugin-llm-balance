@@ -90,7 +90,7 @@ Restart the dsh service (plugin-set changes need a restart; afterwards client-bu
 | apiKeyEnv | DEEPSEEK_API_KEY | (Legacy) credential reference name for single-provider mode |
 | baseURL | per-provider default | (Legacy) optional base URL override for single-provider mode |
 
-Multi-provider mode works out of the box: providers come from the built-in table plus `llm-pi-ai` settings. An explicit `apiKeyEnv` is resolved exclusively; otherwise the `llm-pi-ai/<provider>` API-key record is preferred before the provider's default environment reference. OAuth grants are not interpreted; Codex quota is managed by Codex Connect.
+Multi-provider mode works out of the box: providers come from the built-in table plus `llm-pi-ai`'s live config (read from the configEditor entry on dsh 0.2.x, falling back to the settings namespace on 0.1.x). An explicit `apiKeyEnv` is resolved exclusively; otherwise the `llm-pi-ai/<provider>` API-key record is preferred before the provider's default environment reference. OAuth grants are not interpreted; Codex quota is managed by Codex Connect.
 
 All fields are leniently validated: non-numeric / non-positive `refreshMs` / `timeoutMs`, non-string or empty `provider` / `apiKeyEnv`, non-string `baseURL` all fall back to defaults — the plugin never fails to start because of bad config (zero-dependency `normalizeConfig`, semantically equivalent to the official Config schema fallback).
 
