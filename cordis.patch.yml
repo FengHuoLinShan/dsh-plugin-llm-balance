@@ -5,6 +5,7 @@
 # 由 Node 模块解析定位到已安装的包）。因此用户只需一条命令即可安装并启用：
 #
 #   dsh plugin --profile web add dsh-plugin-llm-balance
+# （要求 dsh >= 0.2.0-rc.2；已在 0.2.2-rc.2 验证。）
 #
 # 之后在 ~/.dsh/profiles/web/cordis.patch.yml 中按 id 覆盖 config 即可
 # （例如 - update: { id: llm-balance, config: { refreshMs: 30000 } }），
@@ -17,7 +18,8 @@
 #   apiKeyEnv  （兼容层）凭证引用名，默认 DEEPSEEK_API_KEY
 #   baseURL    （兼容层）可选 base URL 覆盖
 # 多 provider 模式开箱即用：provider 清单自动来自内置表 + llm-pi-ai
-# settings 命名空间，Key 经 DSH credentials seam 解析，无需任何配置。
+# live 配置（dsh 0.2.x 经 configEditor 条目读取），Key 经 DSH credentials
+# seam 解析，无需任何配置。
 - insert:
     - id: llm-balance
       name: dsh-plugin-llm-balance

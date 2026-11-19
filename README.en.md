@@ -51,7 +51,7 @@ A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 
 ## Install
 
-Requires DSH `0.1.1-rc.2` through `0.1.2-alpha.4`. The former uses loopback RPC authority; the latter uses the host's unified BrowserAuth RPC.
+Requires DSH `0.2.x`, minimum `0.2.0-rc.2` (`engines.dsh: ^0.2.0-rc.2`); verified on `0.2.2-rc.2` (awaitable projection-registration handles, the `/api` exact Fetch route's `requestBody` contract, and the Desktop window-drag region rules).
 
 The plugin ships in the **official bundle form** (`dsh.bundle.patch` activation layer + `dsh.client` browser half, per the [official packaging doc](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)) — a single `dsh plugin add` both installs and activates it (auto-appended to the profile's `bundles` layer):
 
@@ -66,7 +66,7 @@ dsh plugin --profile web add "github:FengHuoLinShan/dsh-plugin-llm-balance#main"
 dsh plugin --profile web add /path/to/dsh-plugin-llm-balance
 
 # D (any version): from a tarball
-dsh plugin --profile web add ./dsh-plugin-llm-balance-0.3.0.tgz
+dsh plugin --profile web add ./dsh-plugin-llm-balance-0.4.2.tgz
 ```
 
 Restart the dsh service (plugin-set changes need a restart; afterwards client-bundle edits hot-reload via HMR only while the DSH checkout's `pnpm run dev:web` watcher is running — otherwise reinstall/restart/refresh), then refresh the page.
@@ -90,7 +90,7 @@ Restart the dsh service (plugin-set changes need a restart; afterwards client-bu
 | apiKeyEnv | DEEPSEEK_API_KEY | (Legacy) credential reference name for single-provider mode |
 | baseURL | per-provider default | (Legacy) optional base URL override for single-provider mode |
 
-Multi-provider mode works out of the box: providers come from the built-in table plus `llm-pi-ai`'s live config (read from the configEditor entry on dsh 0.2.x, falling back to the settings namespace on 0.1.x). An explicit `apiKeyEnv` is resolved exclusively; otherwise the `llm-pi-ai/<provider>` API-key record is preferred before the provider's default environment reference. OAuth grants are not interpreted; Codex quota is managed by Codex Connect.
+Multi-provider mode works out of the box: providers come from the built-in table plus `llm-pi-ai`'s live config (read from the configEditor entry on dsh 0.2.x; the legacy settings-namespace path is kept only for compatibility). An explicit `apiKeyEnv` is resolved exclusively; otherwise the `llm-pi-ai/<provider>` API-key record is preferred before the provider's default environment reference. OAuth grants are not interpreted; Codex quota is managed by Codex Connect.
 
 All fields are leniently validated: non-numeric / non-positive `refreshMs` / `timeoutMs`, non-string or empty `provider` / `apiKeyEnv`, non-string `baseURL` all fall back to defaults — the plugin never fails to start because of bad config (zero-dependency `normalizeConfig`, semantically equivalent to the official Config schema fallback).
 
@@ -113,7 +113,7 @@ dsh plugin --profile web remove dsh-plugin-llm-balance   # removes dependency an
 - **OpenAI Codex has no API key**: quota reads go through `dsh-codex-connect`'s `OpenAICodexCredentialStore`; a DSH-native `llm-pi-ai` grant is used only as a configured-state signal and its OAuth payload is never parsed, copied, or refreshed here.
 - Balance/quota data comes from official APIs and may lag slightly; informational only.
 - **Trust boundary**: balance queries use the `/api/llm-balance` exact Fetch route under dsh-client-connection's `/api` shared channel — Host/Origin fencing and the host's unified BrowserAuth complete before the plugin handler is invoked (identical to the official `/api` routes).
-- **Minimum DSH version**: 0.2.0-alpha (`connection.fetch.register` is available from that version; also works on 0.1.5-rc.x — `connection.rpc.handle` is broken by construction for third-party plugins since 0.1.5-rc.2, so this plugin no longer uses it).
+- **Minimum DSH version**: 0.2.0-rc.2 (`engines.dsh: ^0.2.0-rc.2`). `connection.fetch.register` exists since 0.2.0-alpha; `connection.rpc.handle` has been broken by construction for third-party plugins since 0.1.5-rc.2, so this plugin no longer uses it and declares no `dsh.client.inject` module dependencies.
 
 ## License
 

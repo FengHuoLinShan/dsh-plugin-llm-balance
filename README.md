@@ -15,7 +15,7 @@ DSH（DeepSeek Harness）的余额与配额悬浮卡片。它会在 Web GUI 中�
 - **DeepSeek 峰谷电价徽标**：DeepSeek 余额行尾部显示「☾ 低谷 / ☀ 高峰」小药丸——2026-08-17 起高峰为北京时间工作日 09:00–12:00、14:00–18:00，含周末在内的其余时段均为低谷半价；纯时钟计算不发请求，tooltip 显示时段表与距切换的倒计时，徽标随现有余额轮询及标签页恢复刷新；未配置 Key 的行不挂徽标。
 - **自动发现配置**：合并内置 provider、`llm-pi-ai.providers.*` 和本插件配置，无需逐个添加。
 - **轻量交互**：卡片可拖动并记忆位置；点击即可刷新；默认每 60 秒自动刷新，页面隐藏时暂停、恢复可见时立即更新。
-- **凭据不出服务端**：API Key 和 OAuth token 不会发送到浏览器；DSH 0.1.1 使用 loopback-only RPC，0.1.2 使用其统一 BrowserAuth。
+- **凭据不出服务端**：API Key 和 OAuth token 不会发送到浏览器；浏览器只拿到同源 `/api/llm-balance` 的聚合结果，认证由宿主统一 BrowserAuth 完成。
 
 ### 支持范围
 
@@ -64,7 +64,7 @@ DSH（DeepSeek Harness）的余额与配额悬浮卡片。它会在 Web GUI 中�
 见[官方打包文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)），
 `dsh plugin add` 一条命令即可安装并激活（自动加入 profile 的 bundles 层，无需手改任何文件）：
 
-需要 DSH `0.1.1-rc.2` 至 `0.1.2-alpha.4`；前者使用 loopback RPC，后者使用 BrowserAuth RPC。
+需要 DSH `0.2.x`，最低 `0.2.0-rc.2`（`engines.dsh: ^0.2.0-rc.2`）；已在 `0.2.2-rc.2` 上验证（投影注册 awaitable handle、`/api` 精确 Fetch 路由的 `requestBody` 契约、桌面端窗口拖动区域规则）。
 
 ```bash
 # 方式 A（推荐）：从 npm 安装（发布后）
@@ -77,7 +77,7 @@ dsh plugin --profile web add "github:FengHuoLinShan/dsh-plugin-llm-balance#main"
 dsh plugin --profile web add /path/to/dsh-plugin-llm-balance
 
 # 方式 D（备选，任意版本）：tarball 安装
-dsh plugin --profile web add ./dsh-plugin-llm-balance-0.3.0.tgz
+dsh plugin --profile web add ./dsh-plugin-llm-balance-0.4.2.tgz
 ```
 
 装完**重启 dsh 服务**（插件集合变更需重启生效；此后改动 client bundle 仅在 DSH checkout 的 `pnpm run dev:web` watcher 运行时走 HMR 自动热更，否则需重新安装/重启服务并刷新页面），
@@ -112,7 +112,7 @@ dsh plugin --profile web add ./dsh-plugin-llm-balance-0.3.0.tgz
 | apiKeyEnv | DEEPSEEK_API_KEY | （兼容层）单 provider 模式的凭证引用名 |
 | baseURL | 按 provider 默认 | （兼容层）单 provider 模式的可选 base URL 覆盖 |
 
-多 provider 模式开箱即用：provider 清单来自内置表 + `llm-pi-ai` 的 live 配置（dsh 0.2.x 读 configEditor 条目配置，0.1.x 回退 settings 命名空间）；显式 `apiKeyEnv` 只解析该引用，否则优先读取 `llm-pi-ai/<provider>` API-key record，再回退 provider 默认环境变量。OAuth grant 不被解析；`openai-codex` 配额由 Codex Connect 管理。
+多 provider 模式开箱即用：provider 清单来自内置表 + `llm-pi-ai` 的 live 配置（dsh 0.2.x 读 configEditor 条目配置；旧版 settings 命名空间路径仅作兼容保留）；显式 `apiKeyEnv` 只解析该引用，否则优先读取 `llm-pi-ai/<provider>` API-key record，再回退 provider 默认环境变量。OAuth grant 不被解析；`openai-codex` 配额由 Codex Connect 管理。
 
 > 旧的单 provider 写法（`provider` + `apiKeyEnv`）继续兼容：RPC 响应顶层字段仍按 config.provider 条目返回。
 
@@ -151,4 +151,4 @@ dsh plugin --profile web remove dsh-plugin-llm-balance   # 移除依赖与 bundl
 - **OpenAI Codex 无 API Key**：配额读取经由 `dsh-codex-connect` 的 `OpenAICodexCredentialStore` 封装；DSH 原生 `llm-pi-ai` grant 只用于判断已登录，本插件不解析、复制或刷新其 OAuth payload。
 - 余额/配额数据来自官方接口，可能略有延迟，仅供参考。
 - **信任边界**：余额查询走 dsh-client-connection 的 `/api` 共享通道下的 `/api/llm-balance` 精确 Fetch 路由——Host/Origin 围栏与宿主统一 BrowserAuth 在进入插件 handler 前完成（与官方 `/api` 路由完全一致）。
-- **最低 DSH 版本**：0.2.0-alpha（`connection.fetch.register` 自该版本起可用；0.1.5-rc.x 同样可用，`connection.rpc.handle` 在 0.1.5-rc.2 起对第三方插件构造性损坏，本插件不再使用）。
+- **最低 DSH 版本**：0.2.0-rc.2（`engines.dsh: ^0.2.0-rc.2`）。`connection.fetch.register` 自 0.2.0-alpha 起可用；`connection.rpc.handle` 在 0.1.5-rc.2 起对第三方插件构造性损坏，本插件不再使用，也不再声明任何 `dsh.client.inject` 模块依赖。
