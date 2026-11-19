@@ -4,7 +4,7 @@
 >
 > [English](README.en.md) | 中文
 
-DSH（DeepSeek Harness）的余额与配额悬浮卡片。它会在 Web GUI 中常驻显示最近使用的最多 3 个 provider，让余额、套餐余量和重置时间一眼可见。
+DSH（DeepSeek Harness）的余额与配额悬浮卡片：在 Web GUI 中常驻显示最近使用的最多 3 个 provider 的 API 余额与 Coding Plan 配额。
 
 ![余额与配额悬浮卡片](assets/llm-balance-preview.png)
 

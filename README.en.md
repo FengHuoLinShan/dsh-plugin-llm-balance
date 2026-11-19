@@ -4,7 +4,7 @@
 >
 > English | [中文](README.md)
 
-A general-purpose [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin: a **draggable, minimal rounded card** pinned to the top-right of the Web GUI that shows the balance/quota of the three most recently used providers, including API balances and common coding plans.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin: a **draggable card** pinned to the top-right of the Web GUI that shows API balances and coding-plan quotas for up to 3 recently used providers.
 
 - **Recent providers (≤3)**: counts only successful model calls completed after the plugin is enabled and aggregates the three most recent distinct providers from persisted `sessions.list` projections. Membership updates in real time, while visible providers keep fixed slots: repeated use does not reorder rows, and a newcomer replaces only the evicted provider's slot. It does not scan old history, call `session.models`, or resume cold sessions.
 - **Balance-type** (DeepSeek / Moonshot platform) color-coded by amount:
