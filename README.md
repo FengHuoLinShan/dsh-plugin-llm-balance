@@ -77,7 +77,7 @@ dsh plugin --profile web add "github:FengHuoLinShan/dsh-plugin-llm-balance#main"
 dsh plugin --profile web add /path/to/dsh-plugin-llm-balance
 
 # 方式 D（备选，任意版本）：tarball 安装
-dsh plugin --profile web add ./dsh-plugin-llm-balance-0.4.2.tgz
+dsh plugin --profile web add ./dsh-plugin-llm-balance-0.4.3.tgz
 ```
 
 装完**重启 dsh 服务**（插件集合变更需重启生效；此后改动 client bundle 仅在 DSH checkout 的 `pnpm run dev:web` watcher 运行时走 HMR 自动热更，否则需重新安装/重启服务并刷新页面），

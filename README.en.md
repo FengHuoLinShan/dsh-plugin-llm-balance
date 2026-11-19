@@ -66,7 +66,7 @@ dsh plugin --profile web add "github:FengHuoLinShan/dsh-plugin-llm-balance#main"
 dsh plugin --profile web add /path/to/dsh-plugin-llm-balance
 
 # D (any version): from a tarball
-dsh plugin --profile web add ./dsh-plugin-llm-balance-0.4.2.tgz
+dsh plugin --profile web add ./dsh-plugin-llm-balance-0.4.3.tgz
 ```
 
 Restart the dsh service (plugin-set changes need a restart; afterwards client-bundle edits hot-reload via HMR only while the DSH checkout's `pnpm run dev:web` watcher is running — otherwise reinstall/restart/refresh), then refresh the page.

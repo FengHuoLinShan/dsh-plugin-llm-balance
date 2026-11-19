@@ -518,6 +518,16 @@ console.log("== 11. client 跨会话聚合 + 行文案 ==")
   assert(clientExports.rowTitle({ provider: "deepseek", configured: false, ref: "DEEPSEEK_API_KEY" }) === "DeepSeek 未配置 Key（DEEPSEEK_API_KEY）", "deepseek 未配置 → tooltip 保持 未配置 Key（ref）")
   assert(clientExports.rowTitle({ provider: "deepseek", configured: true, status: "error" }) === "DeepSeek 余额查询失败", "deepseek 查询失败 → tooltip 保持 余额查询失败")
   assert(clientExports.rowTitle({ provider: "moonshotai", configured: false }) === "Moonshot 未配置 Key", "moonshotai 未配置 → tooltip 保持 未配置 Key 无 ref")
+  assert(typeof clientExports.clampPosition === "function", "client 导出卡片位置校正纯函数")
+  assert(JSON.stringify(clientExports.clampPosition({ x: 2000, y: 900 }, { width: 300, height: 80 }, { width: 1280, height: 820 }, 8)) === JSON.stringify({ x: 972, y: 732 }),
+    "位置校正把卡片收进视口右边距")
+  assert(JSON.stringify(clientExports.clampPosition({ x: -5, y: -5 }, { width: 400, height: 100 }, { width: 200, height: 80 }, 8)) === JSON.stringify({ x: 8, y: 8 }),
+    "卡片大于视口时保留最小边距而不是负坐标")
+  assert(JSON.stringify(clientExports.clampPosition({ x: 100, y: 120 }, { width: 300, height: 80 }, { width: 1280, height: 820 }, 8)) === JSON.stringify({ x: 100, y: 120 }),
+    "视口内位置保持不变")
+  assert(clientSource.includes("new ResizeObserver") && clientSource.includes('window.addEventListener("resize"'),
+    "卡片尺寸与视口变化都会触发位置校正")
+  assert(!clientSource.includes("}, [rowCount])"), "位置校正不再只依赖行数")
 }
 
 console.log("== 12. openai-codex：Codex Connect 配额映射（纯函数）==")
@@ -1170,7 +1180,7 @@ console.log("== 20. 截图声明与发布元数据 ==")
   let assetExists = true
   try { await fs.access(new URL("../" + screenshots[0], import.meta.url)) } catch { assetExists = false }
   assert(JSON.stringify(screenshots) === JSON.stringify(["assets/llm-balance-preview.png"]) && assetExists, "screenshots.json 精确指向现有预览图")
-  assert(manifest.version === "0.4.2" && !manifest.files.includes("screenshots.json"), "0.4.2 且截图声明保持仓库级元数据")
+  assert(manifest.version === "0.4.3" && !manifest.files.includes("screenshots.json"), "0.4.3 且截图声明保持仓库级元数据")
   assert(manifest.engines?.dsh === "^0.2.0-rc.2", "engines.dsh 声明兼容的 DSH 0.2.x 范围")
   assert(manifest.dsh?.client?.platform === "web" && !("inject" in (manifest.dsh?.client ?? {})),
     "dsh.client 只声明 web 平台，不再携带过期 inject 模块名")
